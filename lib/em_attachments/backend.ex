@@ -3,7 +3,7 @@ defmodule EmAttachments.Backend do
   Behaviour for storage backends.
   """
 
-  @callback put(id :: String.t(), source_path :: String.t(), opts :: keyword()) ::
+  @callback put(id :: String.t(), source :: EmAttachments.SourceFile.t(), opts :: keyword()) ::
               :ok | {:error, term()}
 
   @callback get(id :: String.t(), opts :: keyword()) ::

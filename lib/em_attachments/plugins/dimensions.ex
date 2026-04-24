@@ -1,11 +1,12 @@
 defmodule EmAttachments.Plugins.Dimensions do
   @moduledoc """
-  Reads image dimensions using a configured `EmAttachments.ImageAdapter`.
+  Reads image dimensions using an `EmAttachments.ImageAdapter` module or an anonymous function.
 
-  Cast result: `%{width: 800, height: 600}`
+  Upload result: `%{width: 800, height: 600}`
 
   Plugin options:
-    - `:adapter` — override the globally configured image adapter
+    - `:adapter` — a module implementing `EmAttachments.ImageAdapter`, or a
+      1-arity function `fn path -> {:ok, %{width: w, height: h}} end` (required)
 
   Validation options:
     - `:min_width`, `:max_width`, `:min_height`, `:max_height`
@@ -14,18 +15,22 @@ defmodule EmAttachments.Plugins.Dimensions do
   use EmAttachments.Plugin
 
   @impl true
-  def cast(temp_file, _uploader, _deps, opts) do
-    adapter = opts[:adapter] || EmAttachments.Config.image_adapter()
+  def init(source, _plugin_key, _uploader, _deps, opts) do
+    path = EmAttachments.SourceFile.local_path!(source)
 
-    cond do
-      is_nil(adapter) ->
-        {:error, "no image adapter configured — set :image_adapter in config or pass adapter: opt"}
+    case opts[:adapter] do
+      nil ->
+        {:error, "dimensions plugin requires an adapter: opt — pass a module or fn/1"}
 
-      not Code.ensure_loaded?(adapter) ->
-        {:error, "image adapter #{inspect(adapter)} is not available"}
+      adapter when is_function(adapter, 1) ->
+        adapter.(path)
 
-      true ->
-        adapter.dimensions(temp_file.path)
+      adapter ->
+        if Code.ensure_loaded?(adapter) do
+          adapter.dimensions(path)
+        else
+          {:error, "image adapter #{inspect(adapter)} is not available"}
+        end
     end
   end
 

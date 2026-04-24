@@ -27,7 +27,11 @@ if Code.ensure_loaded?(Plug.Conn) do
     def call(%Plug.Conn{} = conn, opts) do
       uploader = Keyword.fetch!(opts, :uploader)
 
-      conn = Plug.Parsers.call(conn, Plug.Parsers.init(parsers: [:multipart], length: opts[:max_size] || 100_000_000))
+      conn =
+        Plug.Parsers.call(
+          conn,
+          Plug.Parsers.init(parsers: [:multipart], length: opts[:max_size] || 100_000_000)
+        )
 
       case find_upload(conn.body_params) do
         nil ->

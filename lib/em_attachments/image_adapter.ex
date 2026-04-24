@@ -2,14 +2,14 @@ defmodule EmAttachments.ImageAdapter do
   @moduledoc """
   Behaviour for image library adapters used by `EmAttachments.Plugins.Dimensions`.
 
-  Configure globally:
+  Pass a module implementing this behaviour via the plugin `adapter:` opt:
 
-      config :em_attachments, :config,
-        image_adapter: EmAttachments.ImageAdapters.Vix
+      plugin dimensions: {EmAttachments.Plugins.Dimensions, adapter: MyApp.ImageAdapter}
 
-  Or per-plugin:
+  Alternatively, pass an anonymous function directly:
 
-      plugins: [dimensions: {Plugins.Dimensions, adapter: EmAttachments.ImageAdapters.Mogrify}]
+      plugin dimensions: {EmAttachments.Plugins.Dimensions,
+        adapter: fn path -> {:ok, %{width: 100, height: 100}} end}
   """
 
   @callback dimensions(path :: String.t()) ::

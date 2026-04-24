@@ -1,7 +1,7 @@
 defmodule EmAttachments.UploaderTest do
   use ExUnit.Case, async: false
 
-  alias EmAttachments.Test.{BasicUploader, DerivativeUploader, NoPluginUploader, Fixtures}
+  alias EmAttachments.Test.{BasicUploader, DerivativeUploader, NoPluginUploader, InitAndUploadUploader, Fixtures}
 
   # ---------------------------------------------------------------------------
   # upload/1 → cache
@@ -17,10 +17,10 @@ defmodule EmAttachments.UploaderTest do
     assert file.uploader == to_string(BasicUploader)
   end
 
-  test "upload fails validation when MIME type not allowed" do
+  test "upload fails when file type cannot be detected" do
     input = %{path: Fixtures.txt_path(), filename: "doc.txt"}
-    assert {:error, errors} = BasicUploader.upload(input)
-    assert is_list(errors)
+    # Mime plugin cast fails on unknown type → pipeline returns cast error
+    assert {:error, _reason} = BasicUploader.upload(input)
   end
 
   test "upload with no plugins succeeds for any file" do
@@ -61,6 +61,39 @@ defmodule EmAttachments.UploaderTest do
     assert url =~ stored.id
   end
 
+  test "url uses cache backend render_path for a cached file" do
+    input = %{path: Fixtures.png_path(), filename: "logo.png"}
+    {:ok, cached} = BasicUploader.upload(input)
+    url = BasicUploader.url(cached)
+    assert is_binary(url)
+    assert url =~ cached.id
+    assert String.starts_with?(url, "/files/cache")
+    refute String.starts_with?(url, "/files/store")
+  end
+
+  test "url uses store backend render_path for a promoted file" do
+    input = %{path: Fixtures.png_path(), filename: "logo.png"}
+    {:ok, cached} = BasicUploader.upload(input)
+    {:ok, stored} = BasicUploader.promote(cached)
+    url = BasicUploader.url(stored)
+    assert String.starts_with?(url, "/files/store")
+    refute String.starts_with?(url, "/files/cache")
+  end
+
+  test "url resolves derivative after round-tripping through load_file with string keys" do
+    input = %{path: Fixtures.png_path(), filename: "logo.png"}
+    {:ok, cached} = DerivativeUploader.upload(input)
+    {:ok, stored} = DerivativeUploader.promote(cached)
+
+    # Simulate what Ecto does: dump to map (string keys), then load back
+    {:ok, dumped} = DerivativeUploader.dump(stored)
+    {:ok, loaded} = DerivativeUploader.load(dumped)
+
+    url = DerivativeUploader.url(loaded, derivatives: [:copy])
+    assert is_binary(url)
+    assert url =~ loaded.metadata.plugins.derivatives.variants.copy.id
+  end
+
   test "url returns derivative URL when derivatives key matches" do
     input = %{path: Fixtures.png_path(), filename: "logo.png"}
     {:ok, cached} = DerivativeUploader.upload(input)
@@ -68,7 +101,7 @@ defmodule EmAttachments.UploaderTest do
 
     url = DerivativeUploader.url(stored, derivatives: [:copy])
     assert is_binary(url)
-    assert url =~ stored.metadata.plugins.derivatives.copy.id
+    assert url =~ stored.metadata.plugins.derivatives.variants.copy.id
   end
 
   test "url falls back to original file when derivative key not found" do
@@ -116,6 +149,44 @@ defmodule EmAttachments.UploaderTest do
   # delete/1
   # ---------------------------------------------------------------------------
 
+  # ---------------------------------------------------------------------------
+  # init/5 → upload/6 pipe
+  # ---------------------------------------------------------------------------
+
+  test "init result is available in upload/6 via deps" do
+    {:ok, file} = InitAndUploadUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"})
+    assert file.metadata.plugins.probe.saw_init == true
+    assert file.metadata.plugins.probe.storage == :cache
+  end
+
+  test "init does not run again during promote" do
+    {:ok, cached} = InitAndUploadUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"})
+    {:ok, stored} = InitAndUploadUploader.promote(cached)
+    assert stored.metadata.plugins.probe.saw_init == true
+    assert stored.metadata.plugins.probe.storage == :store
+  end
+
+  # ---------------------------------------------------------------------------
+  # direct-to-store (storage: :store)
+  # ---------------------------------------------------------------------------
+
+  test "upload with storage: :store returns a stored file" do
+    {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"}, storage: :store)
+    assert file.storage == :store
+    assert file.metadata.plugins.mime.type == "image/png"
+  end
+
+  test "init runs during direct-to-store upload" do
+    {:ok, file} = InitAndUploadUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"}, storage: :store)
+    assert file.storage == :store
+    assert file.metadata.plugins.probe.saw_init == true
+    assert file.metadata.plugins.probe.storage == :store
+  end
+
+  # ---------------------------------------------------------------------------
+  # delete/1
+  # ---------------------------------------------------------------------------
+
   test "delete removes file from store" do
     input = %{path: Fixtures.png_path(), filename: "logo.png"}
     {:ok, cached} = BasicUploader.upload(input)
@@ -128,11 +199,12 @@ defmodule EmAttachments.UploaderTest do
   # ---------------------------------------------------------------------------
 
   defmodule PotatoUploader do
-    use EmAttachments.Uploader,
-      plugins: [potato: EmAttachments.Plugins.Derivatives]
+    use EmAttachments.Uploader
 
-    def cast(:derivatives, file) do
-      %{small: File.read!(file.path)}
+    plugin potato: EmAttachments.Plugins.Derivatives
+
+    def handle(:potato, %{file: file}) do
+      %{small: File.read!(EmAttachments.SourceFile.local_path!(file))}
     end
   end
 
@@ -143,7 +215,7 @@ defmodule EmAttachments.UploaderTest do
 
     url = PotatoUploader.url(stored, potato: [:small])
     assert is_binary(url)
-    assert url =~ stored.metadata.plugins.potato.small.id
+    assert url =~ stored.metadata.plugins.potato.variants.small.id
   end
 
   test "url does not resolve under wrong key" do
@@ -154,6 +226,6 @@ defmodule EmAttachments.UploaderTest do
     url = PotatoUploader.url(stored, derivatives: [:small])
     # Falls back to original file URL (derivatives key not found in plugins)
     assert url =~ stored.id
-    refute url =~ stored.metadata.plugins.potato.small.id
+    refute url =~ stored.metadata.plugins.potato.variants.small.id
   end
 end

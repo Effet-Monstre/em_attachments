@@ -4,13 +4,14 @@ defmodule EmAttachments.Plugin do
 
   ## Callbacks (all optional)
 
-  - `cast/4` — runs synchronously at upload time, has access to the temp file path.
-    Returns a metadata fragment stored under the plugin's key.
-  - `after_upload/4` — runs synchronously after promotion to store.
-  - `after_upload_async/4` — runs asynchronously after promotion (if `async: true` in plugin opts).
-    Returns a metadata fragment merged into the stored record.
+  - `upload/6` — called for both the cache phase (during `upload/1`) and the store phase
+    (during `promote/1`). Receives the storage type (`:cache` or `:store`) and the active
+    backend. Return `{:ok, fragment}` to store metadata under this plugin's key, or `:skip`
+    to leave existing metadata unchanged.
   - `validate/4` — called when the uploader declares `validates plugin_key: opts`.
-    Receives the plugin's own cast result as third argument.
+    Receives the plugin's own upload result as third argument.
+  - `destroy/4` — called when the parent file is deleted. Use it to clean up any
+    derived assets stored by this plugin.
   - `url/5` — called by `resolve_url`. Return `{:ok, url}` to short-circuit, `:skip` to pass.
 
   ## Usage
@@ -18,60 +19,69 @@ defmodule EmAttachments.Plugin do
       defmodule MyPlugin do
         use EmAttachments.Plugin, depends_on: [mime: EmAttachments.Plugins.Mime]
 
-        def cast(temp_file, _uploader, deps, _opts) do
+        def upload(temp_file, _plugin_key, _uploader, deps, _opts, {:cache, _mod, _opts}) do
           {:ok, %{detected: deps[:mime][:type]}}
+        end
+
+        def upload(_temp_file, _plugin_key, _uploader, _deps, _opts, {:store, _mod, _opts}) do
+          :skip
         end
       end
   """
 
-  @optional_callbacks [cast: 4, after_upload: 4, after_upload_async: 4, validate: 4, url: 5]
+  @optional_callbacks [init: 5, upload: 6, validate: 4, destroy: 4, url: 5]
 
   @doc """
-  Runs synchronously at upload time. Has access to the temp file (path is readable).
-  `deps` is a map of results from declared dependency plugins.
-  Returns `{:ok, metadata_fragment}`.
+  Simplified alternative to `upload/6` for plugins that only need to run during the cache phase.
+  When defined, `upload/6` is injected automatically: cache calls delegate here, store returns `:skip`.
   """
-  @callback cast(
-              temp_file :: EmAttachments.TempFile.t(),
+  @callback init(
+              source :: EmAttachments.SourceFile.t(),
+              plugin_key :: atom(),
               uploader :: module(),
               deps :: map(),
               plugin_opts :: keyword()
-            ) :: {:ok, map()} | {:error, term()}
+            ) :: {:ok, map()} | :skip | {:error, term()}
 
   @doc """
-  Runs synchronously after promotion to the store backend.
-  `plugin_key` is the key under which this plugin is registered in the uploader.
-  `backend` is `{backend_mod, backend_opts}`.
-  """
-  @callback after_upload(
-              file :: struct(),
-              plugin_key :: atom(),
-              backend :: {module(), keyword()},
-              plugin_opts :: keyword()
-            ) :: {:ok, struct()} | {:error, term()}
+  Called during both the cache upload and store promotion phases.
 
-  @doc """
-  Runs asynchronously after promotion. Called only when `async: true` in plugin opts.
-  Returns a metadata fragment merged into `file.metadata.plugins[plugin_key]`.
+  `storage` is `:cache` or `:store`. `backend_mod` and `backend_opts` are the active backend.
+  `deps` is a map of results from declared dependency plugins for the current phase.
+
+  Return `{:ok, fragment}` to set this plugin's metadata, or `:skip` to leave it unchanged.
   """
-  @callback after_upload_async(
-              file :: struct(),
+  @callback upload(
+              source :: EmAttachments.SourceFile.t(),
               plugin_key :: atom(),
-              backend :: {module(), keyword()},
-              plugin_opts :: keyword()
-            ) :: {:ok, map()} | {:error, term()}
+              uploader :: module(),
+              deps :: map(),
+              plugin_opts :: keyword(),
+              {storage :: :cache | :store, backend_mod :: module(), backend_opts :: keyword()}
+            ) :: {:ok, map()} | :skip | {:error, term()}
 
   @doc """
   Called when the uploader declares `validates plugin_key: validation_opts`.
-  `own_result` is the map returned by this plugin's `cast/4`.
+  `own_result` is the map returned by this plugin's `upload/6` during the cache phase.
   Return `:ok` or `{:error, message_or_list}`.
   """
   @callback validate(
               validation_opts :: keyword(),
-              temp_file :: EmAttachments.TempFile.t(),
+              source :: EmAttachments.SourceFile.t(),
               own_result :: map(),
               plugin_opts :: keyword()
             ) :: :ok | {:error, String.t()} | {:error, [String.t()]}
+
+  @doc """
+  Called when the parent file is being deleted.
+  Use this to clean up derived assets (e.g. stored derivative files).
+  """
+  @callback destroy(
+              file :: struct(),
+              plugin_key :: atom(),
+              backend :: {module(), keyword()},
+              plugin_opts :: keyword()
+            ) :: :ok | {:error, term()}
 
   @doc """
   Called by `resolve_url`. Receives `call_opts[plugin_key]` as `plugin_call_opts`.

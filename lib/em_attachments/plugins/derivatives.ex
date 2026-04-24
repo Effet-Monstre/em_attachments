@@ -2,54 +2,149 @@ defmodule EmAttachments.Plugins.Derivatives do
   @moduledoc """
   Generates derivative files (thumbnails, variants, etc.).
 
-  Define `cast(:derivatives, temp_file)` in your uploader to produce derivatives:
+  Define `handle/2` in your uploader to produce derivatives. The first argument
+  is the plugin key as declared in the uploader (not necessarily `:derivatives`).
+  The second is a map that always contains `:file` (a `EmAttachments.SourceFile.t()`)
+  and optionally a `:store` key indicating the phase.
 
-      def cast(:derivatives, file) do
-        {:ok, resized} = Operation.thumbnail(file.path, 80)
+  Use `EmAttachments.SourceFile.local_path!/1` to get a filesystem path:
+
+  ## Generic handler (same derivatives for both cache and store)
+
+  Use the map pattern without a `:store` key. The plugin will copy the cached
+  derivatives to store during promotion — no re-generation needed:
+
+      def handle(:derivatives, %{file: file}) do
+        path = EmAttachments.SourceFile.local_path!(file)
+        {:ok, resized} = Operation.thumbnail(path, 80)
         {:ok, small_bin} = Image.write_to_buffer(resized, ".png")
         %{small: small_bin}
       end
 
-  The map values may be:
+  ## Phase-specific handlers (different derivatives per phase)
+
+  Match on `store: :cache` and `store: :store` to generate different assets for
+  each phase. During promotion the plugin calls the `:store` clause, then falls
+  back to the generic clause if it returns `:skip`:
+
+      def handle(:derivatives, %{file: file, store: :cache}) do
+        path = EmAttachments.SourceFile.local_path!(file)
+        %{thumb: thumb(path)}
+      end
+
+      def handle(:derivatives, %{file: file, store: :store}) do
+        path = EmAttachments.SourceFile.local_path!(file)
+        %{original: path, thumb: thumb(path)}
+      end
+
+  Map values may be:
     - A binary (file content) — written to a temp file automatically
     - A path string — used as-is
 
   Derivatives may be nested: `%{thumb: %{small: bin, large: bin}}`
-
-  Plugin options:
-    - `:async` — if true, derivative upload is deferred to `after_upload_async/4`
   """
 
   use EmAttachments.Plugin
 
+  alias EmAttachments.{BackendFile, TempFile, Util}
+
   @impl true
-  def cast(temp_file, uploader, _deps, _opts) do
-    if function_exported?(uploader, :cast, 2) do
-      derivatives = uploader.cast(:derivatives, temp_file)
-      {:ok, %{pending: build_pending(derivatives)}}
+  # Cache phase: generate and upload to cache backend.
+  # First tries handle(key, %{file: f}) — the "generic" form that implies the same
+  # derivatives are valid for store (copy_to_store: true).
+  # Falls back to handle(key, %{file: f, store: :cache}) — the cache-specific form,
+  # meaning a separate store handler exists (copy_to_store: false).
+  def upload(
+        source,
+        plugin_key,
+        uploader,
+        _deps,
+        _plugin_opts,
+        {:cache, backend_mod, backend_opts}
+      ) do
+    if not function_exported?(uploader, :handle, 2) do
+      :skip
     else
-      {:ok, %{}}
+      case try_cache_handle(uploader, plugin_key, source) do
+        {map, copy_to_store} when is_map(map) ->
+          case upload_derivatives(map, backend_mod, backend_opts, :cache) do
+            {:ok, uploaded} -> {:ok, %{variants: uploaded, copy_to_store: copy_to_store}}
+            {:error, _} = err -> err
+          end
+
+        :skip ->
+          :skip
+      end
+    end
+  end
+
+  # Store phase: promote or re-generate derivatives into the store backend.
+  # `deps` during promote is the full plugin_results starting from file.metadata.plugins,
+  # so deps[plugin_key] contains our own cache-phase metadata.
+  def upload(
+        source,
+        plugin_key,
+        uploader,
+        deps,
+        _plugin_opts,
+        {:store, backend_mod, backend_opts}
+      ) do
+    own_cache = deps[plugin_key] || %{}
+
+    cond do
+      # Nothing was generated during cache phase — skip
+      not is_map(own_cache) or not Map.has_key?(own_cache, :variants) ->
+        :skip
+
+      # Generic handler was used for cache — copy cached derivatives to store.
+      # When source is a BackendFile (normal promotion), read the cache backend from it
+      # and copy each variant via the backend's put (enabling S3 server-side copy).
+      # Fall back to re-running the handler for non-BackendFile sources (e.g. reprocess).
+      own_cache[:copy_to_store] ->
+        case source do
+          %BackendFile{} = bf ->
+            state = BackendFile.state(bf)
+
+            copy_variants_to_store(
+              own_cache.variants,
+              state.backend_mod,
+              state.backend_opts,
+              backend_mod,
+              backend_opts
+            )
+
+          _ ->
+            case uploader.handle(plugin_key, %{file: source}) do
+              map when is_map(map) -> do_upload_to_store(map, backend_mod, backend_opts)
+              :skip -> :skip
+            end
+        end
+
+      # Cache-specific handler was used — try store-specific, then fall back to generic
+      true ->
+        case try_store_handle(uploader, plugin_key, source) do
+          map when is_map(map) -> do_upload_to_store(map, backend_mod, backend_opts)
+          :skip -> :skip
+        end
     end
   end
 
   @impl true
-  def after_upload(file, plugin_key, backend, opts) do
-    if opts[:async] do
-      {:ok, file}
-    else
-      process(file, plugin_key, backend)
-    end
+  def destroy(file, plugin_key, {backend_mod, backend_opts}, _plugin_opts) do
+    own_data = get_in(file.metadata, [:plugins, plugin_key]) || %{}
+
+    collect_store_ids(own_data)
+    |> Enum.each(fn id -> backend_mod.delete(id, backend_opts) end)
+
+    :ok
   end
 
   @impl true
-  def after_upload_async(file, plugin_key, backend, _opts) do
-    process(file, plugin_key, backend)
-  end
+  def url(_file, nil, _plugin_key, _plugin_opts, _backend), do: :skip
 
-  @impl true
-  def url(file, nil, _plugin_key, _plugin_opts, _backend), do: :skip
   def url(file, path, plugin_key, _plugin_opts, {backend_mod, backend_opts}) when is_list(path) do
-    derivatives = get_in(file.metadata, [:plugins, plugin_key]) || %{}
+    plugin_data = get_in(file.metadata, [:plugins, plugin_key]) || %{}
+    derivatives = plugin_data[:variants] || %{}
 
     result =
       Enum.reduce_while(path, derivatives, fn key, acc ->
@@ -63,7 +158,7 @@ defmodule EmAttachments.Plugins.Derivatives do
       end)
 
     case result do
-      %{id: id, storage: :store} ->
+      %{id: id} ->
         backend_mod.url(id, backend_opts)
 
       _ ->
@@ -73,71 +168,161 @@ defmodule EmAttachments.Plugins.Derivatives do
 
   def url(_, _, _, _, _), do: :skip
 
-  defp process(file, plugin_key, {backend_mod, backend_opts}) do
-    own_data = get_in(file.metadata, [:plugins, plugin_key]) || %{}
+  # ---------------------------------------------------------------------------
+  # Private
+  # ---------------------------------------------------------------------------
 
-    case own_data[:pending] do
-      nil ->
-        {:ok, file}
-
-      pending ->
-        case upload_pending(pending, backend_mod, backend_opts) do
-          {:ok, uploaded} ->
-            new_plugins = Map.put(file.metadata.plugins, plugin_key, uploaded)
-            {:ok, %{file | metadata: %{file.metadata | plugins: new_plugins}}}
-
-          {:error, _} = err ->
-            err
+  defp try_cache_handle(uploader, plugin_key, source) do
+    case uploader.handle(plugin_key, %{file: source}) do
+      :skip ->
+        case uploader.handle(plugin_key, %{file: source, store: :cache}) do
+          map when is_map(map) -> {map, false}
+          :skip -> :skip
         end
+
+      map when is_map(map) ->
+        {map, true}
     end
   end
 
-  defp upload_pending(pending, backend_mod, backend_opts) when is_map(pending) do
-    Enum.reduce_while(pending, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
-      case upload_item(value, backend_mod, backend_opts) do
-        {:ok, result} -> {:cont, {:ok, Map.put(acc, key, result)}}
-        {:error, _} = err -> {:halt, err}
+  defp try_store_handle(uploader, plugin_key, source) do
+    case uploader.handle(plugin_key, %{file: source, store: :store}) do
+      :skip -> uploader.handle(plugin_key, %{file: source})
+      result -> result
+    end
+  end
+
+  defp do_upload_to_store(map, backend_mod, backend_opts) do
+    case upload_derivatives(map, backend_mod, backend_opts, :store) do
+      {:ok, uploaded} -> {:ok, %{variants: uploaded}}
+      err -> err
+    end
+  end
+
+  # Copies already-uploaded cache derivatives to the store backend in parallel.
+  # Each cached variant gets its own BackendFile so the backend can decide to
+  # do a server-side copy (e.g. S3 CopyObject) rather than downloading locally.
+  defp copy_variants_to_store(variants, cache_mod, cache_opts, store_mod, store_opts) do
+    flat = collect_cache_ids(variants)
+
+    flat
+    |> Task.async_stream(
+      fn {key_path, cache_id} ->
+        bf = BackendFile.new(cache_mod, cache_opts, cache_id, "", nil)
+        new_id = Util.random_id(8)
+        result = store_mod.put(new_id, bf, store_opts)
+        BackendFile.cleanup(bf)
+        {key_path, new_id, result}
+      end,
+      ordered: true
+    )
+    |> Enum.reduce_while({:ok, []}, fn
+      {:ok, {key_path, new_id, :ok}}, {:ok, acc} ->
+        {:cont, {:ok, [{key_path, %{id: new_id, storage: :store}} | acc]}}
+
+      {:ok, {_, _, {:error, _} = err}}, _ ->
+        {:halt, err}
+
+      {:exit, reason}, _ ->
+        {:halt, {:error, {:task_exit, reason}}}
+    end)
+    |> case do
+      {:ok, results} -> {:ok, %{variants: reconstruct_tree(Enum.reverse(results))}}
+      err -> err
+    end
+  end
+
+  # Flattens the variant tree to [{[key_path], cache_id}] for parallel copy.
+  defp collect_cache_ids(variants, prefix \\ []) when is_map(variants) do
+    Enum.flat_map(variants, fn {key, value} ->
+      path = prefix ++ [key]
+
+      case value do
+        %{id: id, storage: :cache} -> [{path, id}]
+        nested when is_map(nested) -> collect_cache_ids(nested, path)
+        _ -> []
       end
     end)
   end
 
-  defp upload_item(%{path: path, id: _}, backend_mod, backend_opts) do
-    id = random_id()
+  # Uploads a map of handler outputs in parallel.
+  # build_pending converts binaries to TempFiles; nested maps are recursed.
+  # All leaf TempFiles are collected flat, uploaded concurrently, then the
+  # original tree shape is reconstructed from the results.
+  defp upload_derivatives(map, backend_mod, backend_opts, storage) when is_map(map) do
+    pending = build_pending(map)
+    flat = collect_items(pending)
 
-    case backend_mod.put(id, path, backend_opts) do
-      :ok ->
-        File.rm(path)
-        {:ok, %{id: id, storage: :store}}
+    flat
+    |> Task.async_stream(
+      fn {key_path, %TempFile{} = source} ->
+        id = Util.random_id(8)
+        result = backend_mod.put(id, source, backend_opts)
+        if result == :ok, do: File.rm(source.path)
+        {key_path, id, result}
+      end,
+      ordered: true
+    )
+    |> Enum.reduce_while({:ok, []}, fn
+      {:ok, {key_path, id, :ok}}, {:ok, acc} ->
+        {:cont, {:ok, [{key_path, %{id: id, storage: storage}} | acc]}}
 
-      {:error, _} = err ->
-        err
+      {:ok, {_, _, {:error, _} = err}}, _ ->
+        {:halt, err}
+
+      {:exit, reason}, _ ->
+        {:halt, {:error, {:task_exit, reason}}}
+    end)
+    |> case do
+      {:ok, results} -> {:ok, reconstruct_tree(Enum.reverse(results))}
+      err -> err
     end
   end
 
-  defp upload_item(map, backend_mod, backend_opts) when is_map(map) do
-    upload_pending(map, backend_mod, backend_opts)
+  # Flattens a pending map (built from build_pending) to [{[key_path], TempFile}].
+  defp collect_items(map, prefix \\ []) when is_map(map) do
+    Enum.flat_map(map, fn {key, value} ->
+      path = prefix ++ [key]
+
+      case value do
+        %TempFile{} = tf -> [{path, tf}]
+        nested when is_map(nested) -> collect_items(nested, path)
+      end
+    end)
   end
 
-  # Build temp-file structs for each derivative.
+  # Reconstructs the nested map shape from a flat [{[key_path], value}] list.
+  defp reconstruct_tree(items) do
+    Enum.reduce(items, %{}, fn {path, value}, acc -> put_in_path(acc, path, value) end)
+  end
+
+  defp put_in_path(map, [key], value), do: Map.put(map, key, value)
+
+  defp put_in_path(map, [key | rest], value) do
+    Map.update(map, key, put_in_path(%{}, rest, value), &put_in_path(&1, rest, value))
+  end
+
   defp build_pending(map) when is_map(map) do
     Map.new(map, fn {k, v} -> {k, build_item(v)} end)
   end
 
   defp build_item(content) when is_binary(content) do
-    path = Path.join(System.tmp_dir!(), "em_attach_#{random_id()}")
+    path = Path.join(System.tmp_dir!(), "em_attach_#{Util.random_id(8)}")
     File.write!(path, content)
-    %{path: path, id: random_id()}
+    TempFile.new(path, "derivative")
   end
 
-  defp build_item(path) when is_binary(path) do
-    %{path: path, id: random_id()}
+  defp build_item(map) when is_map(map), do: build_pending(map)
+
+  defp collect_store_ids(map) when is_map(map) do
+    Enum.flat_map(map, fn {_k, v} ->
+      case v do
+        %{id: id, storage: :store} -> [id]
+        nested when is_map(nested) -> collect_store_ids(nested)
+        _ -> []
+      end
+    end)
   end
 
-  defp build_item(map) when is_map(map) do
-    build_pending(map)
-  end
-
-  defp random_id do
-    :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)
-  end
+  defp collect_store_ids(_), do: []
 end

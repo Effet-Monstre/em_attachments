@@ -10,10 +10,11 @@ defmodule EmAttachments.Backends.Local do
   @behaviour EmAttachments.Backend
 
   @impl true
-  def put(id, source_path, opts) do
+  def put(id, source, opts) do
+    path = EmAttachments.SourceFile.local_path!(source)
     dest = dest_path(id, opts)
     File.mkdir_p!(Path.dirname(dest))
-    File.cp!(source_path, dest)
+    File.cp!(path, dest)
     :ok
   end
 

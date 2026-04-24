@@ -14,19 +14,27 @@ defmodule EmAttachments.Backends.S3 do
 
   @behaviour EmAttachments.Backend
 
+  alias EmAttachments.{BackendFile, SourceFile}
   alias EmAttachments.Backends.S3.Signer
 
   @impl true
-  def put(id, source_path, opts) do
-    url = object_url(id, opts)
-    acl_headers = acl_header(opts[:acl])
-    body = File.read!(source_path)
-    headers = Signer.sign_request(:put, url, acl_headers, :unsigned, opts)
+  def put(id, %BackendFile{} = source, opts) do
+    state = BackendFile.state(source)
 
-    case Req.put(url, headers: headers, body: body) do
-      {:ok, %{status: s}} when s in 200..299 -> :ok
-      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
-      {:error, reason} -> {:error, reason}
+    if state.backend_mod == __MODULE__ and same_bucket?(state.backend_opts, opts) do
+      copy_object(state.id, state.backend_opts, id, opts)
+    else
+      case SourceFile.fetch_local_path(source) do
+        {:ok, path} -> do_put(id, path, opts)
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  def put(id, source, opts) do
+    case SourceFile.fetch_local_path(source) do
+      {:ok, path} -> do_put(id, path, opts)
+      {:error, _} = err -> err
     end
   end
 
@@ -57,8 +65,16 @@ defmodule EmAttachments.Backends.S3 do
   @impl true
   def url(id, opts) do
     case opts[:acl] do
-      :public_read -> {:ok, public_url(id, opts)}
-      _ -> {:ok, Signer.presign_url(object_url(id, opts), opts[:url_expires_in] || opts[:expires_in] || 3600, opts)}
+      :public_read ->
+        {:ok, public_url(id, opts)}
+
+      _ ->
+        {:ok,
+         Signer.presign_url(
+           object_url(id, opts),
+           opts[:url_expires_in] || opts[:expires_in] || 3600,
+           opts
+         )}
     end
   end
 
@@ -90,6 +106,39 @@ defmodule EmAttachments.Backends.S3 do
     else
       "https://#{bucket}.s3.#{region}.amazonaws.com"
     end
+  end
+
+  defp do_put(id, path, opts) do
+    url = object_url(id, opts)
+    body = File.read!(path)
+    headers = Signer.sign_request(:put, url, acl_header(opts[:acl]), :unsigned, opts)
+
+    case Req.put(url, headers: headers, body: body) do
+      {:ok, %{status: s}} when s in 200..299 -> :ok
+      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # S3 server-side copy — no local download needed when source and dest share a bucket.
+  defp copy_object(source_id, source_opts, dest_id, dest_opts) do
+    dest_url = object_url(dest_id, dest_opts)
+    source_bucket = Keyword.fetch!(source_opts, :bucket)
+    source_prefix = source_opts[:prefix] || "uploads"
+    copy_source = "/#{source_bucket}/#{source_prefix}/#{source_id}"
+    copy_headers = acl_header(dest_opts[:acl]) |> Map.put("x-amz-copy-source", copy_source)
+    # Sign with the empty-body hash (correct for CopyObject; body is zero bytes)
+    headers = Signer.sign_request(:put, dest_url, copy_headers, "", dest_opts)
+
+    case Req.put(dest_url, headers: headers, body: "") do
+      {:ok, %{status: s}} when s in 200..299 -> :ok
+      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp same_bucket?(source_opts, dest_opts) do
+    Keyword.fetch!(source_opts, :bucket) == Keyword.fetch!(dest_opts, :bucket)
   end
 
   defp acl_header(nil), do: %{}

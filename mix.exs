@@ -4,9 +4,10 @@ defmodule EmAttachments.MixProject do
   def project do
     [
       app: :em_attachments,
-      version: "0.1.0",
+      version: "0.1.12",
       elixir: "~> 1.16",
       start_permanent: Mix.env() == :prod,
+      consolidate_protocols: Mix.env() != :test,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       description: "File attachment library for Elixir, inspired by Shrine",
@@ -27,6 +28,9 @@ defmodule EmAttachments.MixProject do
       {:jason, "~> 1.4"},
       {:ecto, "~> 3.11", optional: true},
       {:plug, "~> 1.16", optional: true},
+      {:vix, "~> 0.35", optional: true},
+      {:mogrify, "~> 0.9", optional: true},
+      {:phoenix, "~> 1.8", optional: true},
       {:ex_doc, "~> 0.31", only: :dev, runtime: false}
     ]
   end

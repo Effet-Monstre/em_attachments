@@ -10,7 +10,15 @@ defmodule EmAttachments.Backends.S3.SignerTest do
   ]
 
   test "sign_request returns a list of headers including authorization" do
-    headers = Signer.sign_request(:put, "https://mybucket.s3.amazonaws.com/uploads/file.txt", %{}, :unsigned, @opts)
+    headers =
+      Signer.sign_request(
+        :put,
+        "https://mybucket.s3.amazonaws.com/uploads/file.txt",
+        %{},
+        :unsigned,
+        @opts
+      )
+
     assert is_list(headers)
     auth = Enum.find_value(headers, fn {k, v} -> k == "authorization" and v end)
     assert auth =~ "AWS4-HMAC-SHA256"
@@ -20,7 +28,9 @@ defmodule EmAttachments.Backends.S3.SignerTest do
   end
 
   test "sign_request includes x-amz-date header" do
-    headers = Signer.sign_request(:get, "https://mybucket.s3.amazonaws.com/test", %{}, :unsigned, @opts)
+    headers =
+      Signer.sign_request(:get, "https://mybucket.s3.amazonaws.com/test", %{}, :unsigned, @opts)
+
     date_header = Enum.find_value(headers, fn {k, v} -> k == "x-amz-date" and v end)
     assert date_header =~ ~r/^\d{8}T\d{6}Z$/
   end
@@ -34,13 +44,15 @@ defmodule EmAttachments.Backends.S3.SignerTest do
   end
 
   test "presign_post returns url and fields map" do
-    {url, fields} = Signer.presign_post(
-      "https://mybucket.s3.amazonaws.com",
-      "mybucket",
-      "cache/",
-      3600,
-      @opts
-    )
+    {url, fields} =
+      Signer.presign_post(
+        "https://mybucket.s3.amazonaws.com",
+        "mybucket",
+        "cache/",
+        3600,
+        @opts
+      )
+
     assert String.starts_with?(url, "https://")
     assert is_map(fields)
     assert Map.has_key?(fields, "policy")

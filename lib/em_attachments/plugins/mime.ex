@@ -2,7 +2,7 @@ defmodule EmAttachments.Plugins.Mime do
   @moduledoc """
   Detects the real MIME type from magic bytes (not from file extension or browser-provided content-type).
 
-  Cast result: `%{type: "image/png", extension: "png"}`
+  Upload result: `%{type: "image/png", extension: "png"}`
 
   Validation options:
     - `:type` — list of allowed MIME types
@@ -12,8 +12,8 @@ defmodule EmAttachments.Plugins.Mime do
   use EmAttachments.Plugin
 
   @impl true
-  def cast(temp_file, _uploader, _deps, _opts) do
-    case detect(temp_file.path) do
+  def init(source, _plugin_key, _uploader, _deps, _plugin_opts) do
+    case detect(EmAttachments.SourceFile.local_path!(source)) do
       {:ok, {type, ext}} -> {:ok, %{type: type, extension: ext}}
       {:error, _} = err -> err
     end
@@ -34,17 +34,23 @@ defmodule EmAttachments.Plugins.Mime do
   end
 
   defp check_type(errors, nil, _), do: errors
+
   defp check_type(errors, allowed, detected) do
     if detected in allowed,
       do: errors,
-      else: ["invalid MIME type #{inspect(detected)}, allowed: #{Enum.join(allowed, ", ")}" | errors]
+      else: [
+        "invalid MIME type #{inspect(detected)}, allowed: #{Enum.join(allowed, ", ")}" | errors
+      ]
   end
 
   defp check_extension(errors, nil, _), do: errors
+
   defp check_extension(errors, allowed, detected) do
     if detected in allowed,
       do: errors,
-      else: ["invalid extension #{inspect(detected)}, allowed: #{Enum.join(allowed, ", ")}" | errors]
+      else: [
+        "invalid extension #{inspect(detected)}, allowed: #{Enum.join(allowed, ", ")}" | errors
+      ]
   end
 
   # Magic bytes detection — no external dependency.

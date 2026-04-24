@@ -5,12 +5,11 @@ defmodule EmAttachments.Uploader do
   ## Basic usage
 
       defmodule MyApp.AvatarUploader do
-        use EmAttachments.Uploader,
-          plugins: [
-            mime: EmAttachments.Plugins.Mime,
-            dimensions: EmAttachments.Plugins.Dimensions,
-            derivatives: {EmAttachments.Plugins.Derivatives, async: false}
-          ]
+        use EmAttachments.Uploader
+
+        plugin mime: EmAttachments.Plugins.Mime
+        plugin dimensions: EmAttachments.Plugins.Dimensions
+        plugin derivatives: EmAttachments.Plugins.Derivatives
 
         validates mime: [type: ~w(image/png image/jpeg), extension: ~w(png jpg jpeg)]
         validates dimensions: [max_width: 4000, max_height: 4000]
@@ -18,21 +17,41 @@ defmodule EmAttachments.Uploader do
         # Override store/cache backend for this uploader only:
         # use EmAttachments.Uploader, store: {Backends.S3, acl: :public_read}, ...
 
-        # Custom validation (receives temp_file and all plugin results):
-        def validate(temp_file, plugin_results) do
+        # Custom validation (receives the source file and all plugin results):
+        def validate(source, plugin_results) do
           case plugin_results[:dimensions] do
             %{width: w, height: h} when w != h -> {:error, "must be square"}
             _ -> :ok
           end
         end
 
-        # Generate derivatives:
-        def cast(:derivatives, file) do
-          {:ok, resized} = Operation.thumbnail(file.path, 80)
+        # Generate derivatives (called by EmAttachments.Plugins.Derivatives):
+        def handle(:derivatives, %{file: file}) do
+          path = EmAttachments.SourceFile.local_path!(file)
+          {:ok, resized} = Operation.thumbnail(path, 80)
           {:ok, small} = Image.write_to_buffer(resized, ".png")
           %{small: small}
         end
       end
+
+  ## Deferred promotion
+
+  To skip promotion during Ecto save and promote later (e.g. in a background job):
+
+      # In your changeset — saves the file in :cache state
+      cast_attachments(changeset, [:avatar], promote: false)
+
+      # Later, in a background job — promotes the cached file to :store
+      cast_attachments(changeset, [:avatar], promote: true)
+
+  ## Reprocessing
+
+  To re-run all plugins (including derivative generation) on an already-stored file:
+
+      {:ok, new_file} = MyUploader.reprocess(stored_file)
+
+  This downloads the original from the store, runs the full upload pipeline, promotes the
+  result back to store, and deletes the original.
 
   ## Ecto integration
 
@@ -41,33 +60,61 @@ defmodule EmAttachments.Uploader do
   `EmAttachments.Ecto` in your changeset.
   """
 
-  alias EmAttachments.Uploader.Pipeline
+  alias EmAttachments.Uploader.Topo
 
   defmacro __using__(opts) do
     quote do
-      import EmAttachments.Uploader, only: [validates: 1]
+      import EmAttachments.Uploader, only: [validates: 1, plugin: 1]
 
       @em_uploader_opts unquote(opts)
       @em_validations []
+      @em_plugins []
 
       @before_compile EmAttachments.Uploader
 
       defstruct [:id, :storage, :metadata, :uploader]
 
-      def __uploader_opts__, do: @em_uploader_opts
+      defimpl String.Chars do
+        def to_string(%{storage: :cache} = file),
+          do: String.to_existing_atom(file.uploader).serialize(file)
 
-      def __uploader_plugins__ do
-        EmAttachments.Uploader.Pipeline.normalize_plugins(
-          @em_uploader_opts[:plugins] || []
-        )
+        def to_string(%{id: id}) when is_binary(id), do: id
+        def to_string(_), do: ""
       end
+
+      if Code.ensure_loaded?(Phoenix.HTML.Safe) do
+        defimpl Phoenix.HTML.Safe do
+          def to_iodata(file), do: Phoenix.HTML.Safe.to_iodata(Kernel.to_string(file))
+        end
+      end
+
+      def __uploader_opts__, do: @em_uploader_opts
+    end
+  end
+
+  @doc """
+  Declares a plugin for this uploader.
+
+      plugin mime: EmAttachments.Plugins.Mime
+
+  """
+  defmacro plugin(keyword_list) do
+    entries =
+      Enum.map(keyword_list, fn {plugin_key, plugin_val} ->
+        quote do
+          @em_plugins [{unquote(plugin_key), unquote(plugin_val)} | @em_plugins]
+        end
+      end)
+
+    quote do
+      (unquote_splicing(entries))
     end
   end
 
   @doc """
   Declares validation rules dispatched to the named plugin.
 
-      validates mime: [type: ~w(image/png), extension: ~w(png jpg)]
+      validates mime: [type: ~w(image/png), extension: ~w(png jpg jpeg)]
   """
   defmacro validates(keyword_list) do
     entries =
@@ -78,7 +125,7 @@ defmodule EmAttachments.Uploader do
       end)
 
     quote do
-      unquote_splicing(entries)
+      (unquote_splicing(entries))
     end
   end
 
@@ -90,13 +137,12 @@ defmodule EmAttachments.Uploader do
 
     plugins =
       env.module
-      |> Module.get_attribute(:em_uploader_opts, [])
-      |> Keyword.get(:plugins, [])
+      |> Module.get_attribute(:em_plugins, [])
+      |> Enum.reverse()
 
-    normalized = Pipeline.normalize_plugins(plugins)
+    normalized = Topo.normalize_plugins(plugins)
 
-    # Cycle detection at compile time.
-    case Pipeline.resolve_order(normalized) do
+    case Topo.resolve_order(normalized) do
       {:error, :cycle} ->
         raise CompileError,
           description: "Circular plugin dependency in #{inspect(env.module)}",
@@ -113,7 +159,10 @@ defmodule EmAttachments.Uploader do
           if Code.ensure_loaded?(Plug.Upload) do
             quote do
               def cast(%Plug.Upload{} = upload) do
-                __MODULE__.upload(upload)
+                case __MODULE__.upload(upload) do
+                  {:ok, file} -> {:ok, file}
+                  {:error, reason} -> {:error, [message: "upload failed: #{inspect(reason)}"]}
+                end
               end
             end
           else
@@ -163,17 +212,22 @@ defmodule EmAttachments.Uploader do
 
     quote do
       def __validations__, do: unquote(validations)
+      def __uploader_plugins__, do: unquote(Macro.escape(normalized))
 
-      def upload(input) do
-        EmAttachments.Uploader.Pipeline.upload(__MODULE__, input)
+      def upload(input, call_opts \\ []) do
+        EmAttachments.Uploader.Pipeline.upload(__MODULE__, input, call_opts)
       end
 
-      def promote(cached_file) do
-        EmAttachments.Uploader.Pipeline.promote(__MODULE__, cached_file)
+      def promote(cached_file, call_opts \\ []) do
+        EmAttachments.Uploader.Pipeline.promote(__MODULE__, cached_file, call_opts)
       end
 
       def delete(file) do
         EmAttachments.Uploader.Pipeline.delete(__MODULE__, file)
+      end
+
+      def reprocess(file) do
+        EmAttachments.Uploader.Pipeline.reprocess(__MODULE__, file)
       end
 
       def url(file, opts \\ []) do
@@ -191,6 +245,9 @@ defmodule EmAttachments.Uploader do
       def deserialize(json) do
         EmAttachments.Uploader.Pipeline.deserialize(__MODULE__, json)
       end
+
+      def handle(_, _), do: :skip
+      defoverridable handle: 2
 
       unquote(ecto_code)
     end

@@ -1,8 +1,12 @@
 defmodule EmAttachmentsTest do
-  use ExUnit.Case
-  doctest EmAttachments
+  use ExUnit.Case, async: true
 
-  test "greets the world" do
-    assert EmAttachments.hello() == :world
+  test "url/2 returns nil for nil" do
+    assert EmAttachments.url(nil) == nil
+  end
+
+  test "url/2 returns nil for unknown uploader string" do
+    file = %{uploader: "NonExistentUploader123", id: "x", storage: :store, metadata: nil}
+    assert EmAttachments.url(file) == nil
   end
 end

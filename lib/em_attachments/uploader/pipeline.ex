@@ -1,84 +1,187 @@
 defmodule EmAttachments.Uploader.Pipeline do
   @moduledoc false
 
-  alias EmAttachments.{Config, Signer, TempFile}
+  alias EmAttachments.{BackendFile, Config, Signer, SourceFile, TempFile, Util}
+  alias EmAttachments.Uploader.Topo
 
   # ---------------------------------------------------------------------------
   # Public API (called from uploader macro-generated functions)
   # ---------------------------------------------------------------------------
 
-  def upload(uploader, input) do
-    with {:ok, temp_file} <- to_temp_file(input),
-         ordered <- resolve_order!(uploader.__uploader_plugins__()),
-         {:ok, plugin_results} <- run_cast(temp_file, uploader, ordered),
-         :ok <- run_validations(temp_file, uploader.__validations__(), ordered, plugin_results),
-         :ok <- run_custom_validate(temp_file, plugin_results, uploader) do
-      {cache_mod, cache_opts} = Config.cache(uploader.__uploader_opts__())
-      id = random_id()
+  # call_opts keys:
+  #   :storage — :store to skip cache and write directly to store backend
+  #   :promote — false | true (default true); controls whether promote/3 runs promotion
+  #   any plugin key (atom) — keyword list merged into that plugin's compile-time opts
+  def upload(uploader, input, call_opts \\ []) do
+    if call_opts[:storage] == :store do
+      upload_direct_to_store(uploader, input, call_opts)
+    else
+      upload_to_cache(uploader, input, call_opts)
+    end
+  end
+
+  defp upload_to_cache(uploader, input, call_opts) do
+    with {:ok, source} <- to_source_file(input),
+         ordered <- Topo.resolve_order!(uploader.__uploader_plugins__()),
+         {cache_mod, cache_opts} = Config.cache(uploader.__uploader_opts__()),
+         {:ok, plugin_results} <-
+           run_plugins(source, uploader, ordered, call_opts, {:cache, cache_mod, cache_opts}, %{}),
+         :ok <-
+           run_validations(source, uploader.__validations__(), ordered, plugin_results, call_opts),
+         :ok <- run_custom_validate(source, plugin_results, uploader) do
+      id = Util.random_id()
 
       file =
         struct(uploader, %{
           id: id,
           storage: :cache,
-          metadata: %{size: temp_file.size, filename: temp_file.filename, plugins: plugin_results},
+          metadata: %{
+            size: SourceFile.size(source),
+            filename: SourceFile.filename(source),
+            plugins: plugin_results
+          },
           uploader: to_string(uploader)
         })
 
-      case cache_mod.put(id, temp_file.path, cache_opts) do
+      case cache_mod.put(id, source, cache_opts) do
         :ok -> {:ok, file}
         {:error, reason} -> {:error, reason}
       end
     end
   end
 
-  def promote(uploader, %{storage: :cache} = cached_file) do
-    {cache_mod, cache_opts} = Config.cache(uploader.__uploader_opts__())
-    {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
-    ordered = resolve_order!(uploader.__uploader_plugins__())
-    tmp = tmp_path()
+  defp upload_direct_to_store(uploader, input, call_opts) do
+    with {:ok, source} <- to_source_file(input),
+         ordered <- Topo.resolve_order!(uploader.__uploader_plugins__()),
+         {store_mod, store_opts} = Config.store(uploader.__uploader_opts__()),
+         {:ok, plugin_results} <-
+           run_plugins(source, uploader, ordered, call_opts, {:store, store_mod, store_opts}, %{}),
+         :ok <-
+           run_validations(source, uploader.__validations__(), ordered, plugin_results, call_opts),
+         :ok <- run_custom_validate(source, plugin_results, uploader) do
+      id = Util.random_id()
 
-    result =
-      with {:ok, content} <- cache_mod.get(cached_file.id, cache_opts),
-           :ok <- File.write(tmp, content) do
-        stored_file = %{cached_file | storage: :store}
+      file =
+        struct(uploader, %{
+          id: id,
+          storage: :store,
+          metadata: %{
+            size: SourceFile.size(source),
+            filename: SourceFile.filename(source),
+            plugins: plugin_results
+          },
+          uploader: to_string(uploader)
+        })
 
-        with :ok <- store_mod.put(cached_file.id, tmp, store_opts),
-             {:ok, stored_file} <- run_after_upload(stored_file, ordered, {store_mod, store_opts}) do
-          stored_file = dispatch_async(stored_file, ordered, {store_mod, store_opts}, uploader)
-          cache_mod.delete(cached_file.id, cache_opts)
-          {:ok, stored_file}
-        end
+      case store_mod.put(id, source, store_opts) do
+        :ok -> {:ok, file}
+        {:error, reason} -> {:error, reason}
       end
-
-    File.rm(tmp)
-    result
+    end
   end
 
-  def promote(_uploader, %{storage: :store} = file), do: {:ok, file}
+  def promote(uploader, cached_file, call_opts \\ [])
+
+  def promote(uploader, %{storage: :cache} = cached_file, call_opts) do
+    if call_opts[:promote] == false do
+      {:ok, cached_file}
+    else
+      {cache_mod, cache_opts} = Config.cache(uploader.__uploader_opts__())
+      {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
+      ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
+
+      source =
+        BackendFile.new(
+          cache_mod,
+          cache_opts,
+          cached_file.id,
+          cached_file.metadata[:filename] || "",
+          cached_file.metadata[:size]
+        )
+
+      result =
+        with :ok <- store_mod.put(cached_file.id, source, store_opts) do
+          stored_file = %{cached_file | storage: :store}
+          # Store phase: start accumulation from existing metadata so plugins can read
+          # their own cache-phase data via deps[plugin_key].
+          initial_results = cached_file.metadata[:plugins] || %{}
+
+          with {:ok, stored_file} <-
+                 run_plugins(
+                   source,
+                   uploader,
+                   ordered,
+                   call_opts,
+                   {:store, store_mod, store_opts},
+                   initial_results,
+                   stored_file
+                 ) do
+            cache_mod.delete(cached_file.id, cache_opts)
+            {:ok, stored_file}
+          end
+        end
+
+      BackendFile.cleanup(source)
+      result
+    end
+  end
+
+  def promote(_uploader, %{storage: :store} = file, _call_opts), do: {:ok, file}
 
   def delete(uploader, file) do
     {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
-    ordered = resolve_order!(uploader.__uploader_plugins__())
+    ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
 
     for {key, mod, plugin_opts} <- ordered,
-        function_exported?(mod, :after_upload, 4) do
-      mod.after_upload(%{file | metadata: %{file.metadata | plugins: Map.put(file.metadata.plugins, key, :delete)}}, key, {store_mod, store_opts}, plugin_opts)
+        function_exported?(mod, :destroy, 4) do
+      mod.destroy(file, key, {store_mod, store_opts}, plugin_opts)
     end
 
     store_mod.delete(file.id, store_opts)
     :ok
   end
 
+  def reprocess(uploader, %{storage: :store} = file) do
+    {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
+    old_id = file.id
+
+    source =
+      BackendFile.new(
+        store_mod,
+        store_opts,
+        old_id,
+        file.metadata[:filename] || "",
+        file.metadata[:size]
+      )
+
+    result =
+      with {:ok, cached_file} <- upload(uploader, source),
+           {:ok, new_stored_file} <- promote(uploader, cached_file) do
+        store_mod.delete(old_id, store_opts)
+        {:ok, new_stored_file}
+      end
+
+    BackendFile.cleanup(source)
+    result
+  end
+
+  def resolve_url(_uploader, nil, _call_opts), do: nil
+
   def resolve_url(uploader, file, call_opts) do
     {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
-    ordered = resolve_order!(uploader.__uploader_plugins__())
+    ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
+
+    backend =
+      if file.storage == :cache,
+        do: Config.cache(uploader.__uploader_opts__()),
+        else: {store_mod, store_opts}
 
     plugin_url =
       Enum.reduce_while(ordered, :skip, fn {key, mod, plugin_opts}, _ ->
         if function_exported?(mod, :url, 5) do
           plugin_call_opts = call_opts[key]
 
-          case mod.url(file, plugin_call_opts, key, plugin_opts, {store_mod, store_opts}) do
+          case mod.url(file, plugin_call_opts, key, plugin_opts, backend) do
             {:ok, url} -> {:halt, {:ok, url}}
             :skip -> {:cont, :skip}
           end
@@ -92,13 +195,14 @@ defmodule EmAttachments.Uploader.Pipeline do
         url
 
       :skip ->
-        # Fallback: original file URL from the backend.
-        # Drop plugin keys from call_opts, pass the rest to the backend (e.g. expires_in).
         plugin_keys = Enum.map(ordered, &elem(&1, 0))
         backend_call_opts = Keyword.drop(call_opts, plugin_keys)
-        merged_opts = Keyword.merge(store_opts, backend_call_opts)
 
-        case store_mod.url(file.id, merged_opts) do
+        {backend_mod, backend_opts} = backend
+
+        merged_opts = Keyword.merge(backend_opts, backend_call_opts)
+
+        case backend_mod.url(file.id, merged_opts) do
           {:ok, url} -> url
           _ -> nil
         end
@@ -107,11 +211,11 @@ defmodule EmAttachments.Uploader.Pipeline do
 
   def presign_upload(uploader) do
     {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
-    id = random_id()
+    id = Util.random_id()
     store_mod.presign_upload(id, store_opts)
   end
 
-  def serialize(uploader, %{storage: :cache} = file) do
+  def serialize(_uploader, %{storage: :cache} = file) do
     secret = Config.secret_key!()
     signed_id = Signer.sign(file.id, secret)
     file |> Map.from_struct() |> Map.put(:id, signed_id) |> Jason.encode!()
@@ -123,8 +227,8 @@ defmodule EmAttachments.Uploader.Pipeline do
 
   def deserialize(uploader, json) do
     with {:ok, data} <- Jason.decode(json),
-         data <- atomize_keys(data),
-         :cache <- to_atom(data[:storage]) do
+         data <- Util.atomize_keys(data),
+         :cache <- Util.to_atom(data[:storage]) do
       secret = Config.secret_key!()
 
       case Signer.verify(data[:id], secret) do
@@ -141,88 +245,109 @@ defmodule EmAttachments.Uploader.Pipeline do
   end
 
   def load_file(uploader, data) when is_map(data) do
-    data = atomize_keys(data)
+    data = Util.atomize_keys(data)
 
     metadata =
       if m = data[:metadata] do
-        m = atomize_keys(m)
-        plugins = atomize_keys(m[:plugins] || %{}) |> deep_atomize_storage()
+        m = Util.atomize_keys(m)
+        plugins = (m[:plugins] || %{}) |> Util.deep_atomize_keys() |> Util.deep_atomize_storage()
         %{size: m[:size], filename: m[:filename], plugins: plugins}
       end
 
     struct(uploader, %{
       id: data[:id],
-      storage: to_atom(data[:storage]),
+      storage: Util.to_atom(data[:storage]),
       metadata: metadata,
       uploader: data[:uploader]
     })
   end
 
   # ---------------------------------------------------------------------------
-  # Compile-time helpers (called from __before_compile__)
-  # ---------------------------------------------------------------------------
-
-  @doc "Resolves plugin execution order via Kahn's topological sort. Raises CompileError on cycle."
-  def resolve_order!(plugins) do
-    case resolve_order(plugins) do
-      {:ok, ordered} -> ordered
-      {:error, :cycle} -> raise "EmAttachments: circular plugin dependency detected"
-    end
-  end
-
-  @doc "Same as resolve_order!/1 but returns {:ok, list} | {:error, :cycle}."
-  def resolve_order(plugins) do
-    # plugins :: [{key, mod, opts}]
-    keys = Enum.map(plugins, &elem(&1, 0))
-    key_set = MapSet.new(keys)
-    plugin_map = Map.new(plugins, fn {k, m, o} -> {k, {m, o}} end)
-
-    # deps_map: key → [dep_keys declared in this plugin that exist in the uploader]
-    deps_map =
-      Map.new(plugins, fn {key, mod, _opts} ->
-        dep_keys =
-          mod.__plugin_deps__()
-          |> Keyword.keys()
-          |> Enum.filter(&MapSet.member?(key_set, &1))
-
-        {key, dep_keys}
-      end)
-
-    in_degree = Map.new(keys, fn k -> {k, length(deps_map[k])} end)
-
-    # reverse_deps: dep_key → [keys that depend on it]
-    reverse_deps =
-      Enum.reduce(plugins, Map.new(keys, fn k -> {k, []} end), fn {key, _m, _o}, acc ->
-        Enum.reduce(deps_map[key], acc, fn dep_key, inner ->
-          Map.update!(inner, dep_key, &[key | &1])
-        end)
-      end)
-
-    queue = keys |> Enum.filter(&(in_degree[&1] == 0)) |> :queue.from_list()
-    kahn(queue, in_degree, reverse_deps, plugin_map, [])
-  end
-
-  # ---------------------------------------------------------------------------
-  # Normalize plugins list [{key, mod} | {key, {mod, opts}}] → [{key, mod, opts}]
-  # ---------------------------------------------------------------------------
-
-  def normalize_plugins(plugins) do
-    Enum.map(plugins, fn
-      {key, mod} when is_atom(mod) -> {key, mod, []}
-      {key, {mod, opts}} when is_atom(mod) -> {key, mod, opts}
-    end)
-  end
-
-  # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
 
-  defp to_temp_file(%TempFile{} = t), do: {:ok, t}
+  defp run_plugins(source, uploader, ordered_plugins, call_opts, store_context, initial_results) do
+    Enum.reduce_while(ordered_plugins, {:ok, initial_results}, fn {key, mod, compile_opts},
+                                                                  {:ok, results} ->
+      plugin_opts = merge_plugin_opts(compile_opts, call_opts, key)
 
-  defp to_temp_file(input) do
+      # During the store phase, pass the full accumulator as deps so plugins
+      # can access their own cache-phase metadata via deps[plugin_key].
+      # During the cache phase, only pass declared dependency results.
+      deps =
+        case store_context do
+          {:cache, _, _} -> build_deps(mod.__plugin_deps__(), results)
+          {:store, _, _} -> results
+        end
+
+      # init runs once per lifecycle — skipped if a prior-phase result already exists
+      init_out =
+        if function_exported?(mod, :init, 5) and not Map.has_key?(results, key) do
+          mod.init(source, key, uploader, deps, plugin_opts)
+        else
+          :skip
+        end
+
+      case init_out do
+        {:error, _} = err ->
+          {:halt, err}
+
+        _ ->
+          # Pipe init result into deps under plugin's own key
+          deps =
+            case init_out do
+              {:ok, fragment} -> Map.put(deps, key, fragment)
+              :skip -> deps
+            end
+
+          upload_out =
+            if function_exported?(mod, :upload, 6) do
+              mod.upload(source, key, uploader, deps, plugin_opts, store_context)
+            else
+              :skip
+            end
+
+          case upload_out do
+            {:error, _} = err ->
+              {:halt, err}
+
+            _ ->
+              final =
+                case {init_out, upload_out} do
+                  {_, {:ok, f}} -> {:ok, f}
+                  {{:ok, f}, :skip} -> {:ok, f}
+                  {:skip, :skip} -> :skip
+                end
+
+              case final do
+                {:ok, f} -> {:cont, {:ok, Map.put(results, key, f)}}
+                :skip -> {:cont, {:ok, results}}
+              end
+          end
+      end
+    end)
+  end
+
+  # Store phase: takes the file struct and updates its plugins metadata.
+  defp run_plugins(source, uploader, ordered_plugins, call_opts, store_context, initial_results, file) do
+    case run_plugins(source, uploader, ordered_plugins, call_opts, store_context, initial_results) do
+      {:ok, new_plugins} -> {:ok, %{file | metadata: %{file.metadata | plugins: new_plugins}}}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp merge_plugin_opts(compile_opts, call_opts, key) do
+    runtime_opts = Keyword.get(call_opts, key, [])
+    Keyword.merge(compile_opts, List.wrap(runtime_opts))
+  end
+
+  defp to_source_file(%TempFile{} = t), do: {:ok, t}
+  defp to_source_file(%BackendFile{} = bf), do: {:ok, bf}
+
+  defp to_source_file(input) do
     cond do
       Code.ensure_loaded?(Plug.Upload) and match?(%Plug.Upload{}, input) ->
-        {:ok, TempFile.from_plug(input)}
+        {:ok, input}
 
       is_map(input) and (Map.has_key?(input, :path) or Map.has_key?(input, "path")) ->
         {:ok, TempFile.from_map(input)}
@@ -232,35 +357,21 @@ defmodule EmAttachments.Uploader.Pipeline do
     end
   end
 
-  defp run_cast(temp_file, uploader, ordered_plugins) do
-    Enum.reduce_while(ordered_plugins, {:ok, %{}}, fn {key, mod, opts}, {:ok, results} ->
-      if function_exported?(mod, :cast, 4) do
-        deps = build_deps(mod.__plugin_deps__(), results)
-
-        case mod.cast(temp_file, uploader, deps, opts) do
-          {:ok, fragment} -> {:cont, {:ok, Map.put(results, key, fragment)}}
-          {:error, _} = err -> {:halt, err}
-        end
-      else
-        {:cont, {:ok, results}}
-      end
-    end)
-  end
-
   defp build_deps(declared_deps, plugin_results) do
     Map.new(declared_deps, fn {dep_key, _dep_mod} ->
       {dep_key, plugin_results[dep_key]}
     end)
   end
 
-  defp run_validations(temp_file, validations, ordered_plugins, plugin_results) do
+  defp run_validations(source, validations, ordered_plugins, plugin_results, call_opts) do
     errors =
       Enum.flat_map(validations, fn {plugin_key, validation_opts} ->
-        with {mod, plugin_opts} <- find_plugin(ordered_plugins, plugin_key),
+        with {mod, compile_opts} <- find_plugin(ordered_plugins, plugin_key),
              true <- function_exported?(mod, :validate, 4) do
+          plugin_opts = merge_plugin_opts(compile_opts, call_opts, plugin_key)
           own_result = plugin_results[plugin_key] || %{}
 
-          case mod.validate(validation_opts, temp_file, own_result, plugin_opts) do
+          case mod.validate(validation_opts, source, own_result, plugin_opts) do
             :ok -> []
             {:error, msg} when is_binary(msg) -> [msg]
             {:error, msgs} when is_list(msgs) -> msgs
@@ -273,65 +384,14 @@ defmodule EmAttachments.Uploader.Pipeline do
     if errors == [], do: :ok, else: {:error, errors}
   end
 
-  defp run_custom_validate(temp_file, plugin_results, uploader) do
+  defp run_custom_validate(source, plugin_results, uploader) do
     if function_exported?(uploader, :validate, 2) do
-      case uploader.validate(temp_file, plugin_results) do
+      case uploader.validate(source, plugin_results) do
         :ok -> :ok
         {:error, _} = err -> err
       end
     else
       :ok
-    end
-  end
-
-  defp run_after_upload(file, ordered_plugins, backend) do
-    Enum.reduce_while(ordered_plugins, {:ok, file}, fn {key, mod, plugin_opts}, {:ok, acc} ->
-      if function_exported?(mod, :after_upload, 4) and not plugin_opts[:async] do
-        case mod.after_upload(acc, key, backend, plugin_opts) do
-          {:ok, updated} -> {:cont, {:ok, updated}}
-          {:error, _} = err -> {:halt, err}
-        end
-      else
-        {:cont, {:ok, acc}}
-      end
-    end)
-  end
-
-  defp dispatch_async(file, ordered_plugins, backend, uploader) do
-    case Config.async_dispatcher() do
-      :inline ->
-        Enum.reduce(ordered_plugins, file, fn {key, mod, plugin_opts}, acc ->
-          if plugin_opts[:async] and function_exported?(mod, :after_upload_async, 4) do
-            case mod.after_upload_async(acc, key, backend, plugin_opts) do
-              {:ok, fragment} when is_map(fragment) ->
-                new_plugins = Map.put(acc.metadata.plugins, key, fragment)
-                %{acc | metadata: %{acc.metadata | plugins: new_plugins}}
-
-              {:ok, updated_file} when is_struct(updated_file) ->
-                updated_file
-
-              _ ->
-                acc
-            end
-          else
-            acc
-          end
-        end)
-
-      dispatcher ->
-        for {key, mod, plugin_opts} <- ordered_plugins,
-            plugin_opts[:async],
-            function_exported?(mod, :after_upload_async, 4) do
-          dispatcher.enqueue(%{
-            uploader: uploader,
-            file_id: file.id,
-            plugin_key: key,
-            plugin_mod: mod,
-            plugin_opts: plugin_opts
-          })
-        end
-
-        file
     end
   end
 
@@ -342,68 +402,4 @@ defmodule EmAttachments.Uploader.Pipeline do
     end
   end
 
-  defp kahn(queue, in_degree, reverse_deps, plugin_map, result) do
-    case :queue.out(queue) do
-      {:empty, _} ->
-        processed = length(result)
-        total = map_size(plugin_map)
-
-        if processed == total do
-          {:ok, Enum.reverse(result)}
-        else
-          {:error, :cycle}
-        end
-
-      {{:value, key}, rest} ->
-        {mod, opts} = plugin_map[key]
-        new_result = [{key, mod, opts} | result]
-
-        {new_queue, new_in_degree} =
-          Enum.reduce(reverse_deps[key], {rest, in_degree}, fn dep_key, {q, id} ->
-            updated = Map.update!(id, dep_key, &(&1 - 1))
-
-            if updated[dep_key] == 0 do
-              {:queue.in(dep_key, q), updated}
-            else
-              {q, updated}
-            end
-          end)
-
-        kahn(new_queue, new_in_degree, reverse_deps, plugin_map, new_result)
-    end
-  end
-
-  defp random_id do
-    :crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)
-  end
-
-  defp tmp_path do
-    Path.join(System.tmp_dir!(), "em_attach_#{random_id()}")
-  end
-
-  defp atomize_keys(map) when is_map(map) do
-    Map.new(map, fn {k, v} -> {to_atom(k), v} end)
-  end
-
-  defp atomize_keys(other), do: other
-
-  defp to_atom(k) when is_atom(k), do: k
-  defp to_atom(k) when is_binary(k), do: String.to_atom(k)
-
-  # Recursively converts "storage" string values inside derivative maps to atoms.
-  defp deep_atomize_storage(map) when is_map(map) do
-    Map.new(map, fn {k, v} -> {k, deep_atomize_storage(v)} end)
-  end
-
-  defp deep_atomize_storage(list) when is_list(list), do: list
-
-  defp deep_atomize_storage(s) when is_binary(s) do
-    case s do
-      "cache" -> :cache
-      "store" -> :store
-      other -> other
-    end
-  end
-
-  defp deep_atomize_storage(other), do: other
 end

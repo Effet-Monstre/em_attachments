@@ -180,8 +180,14 @@ defmodule EmAttachments.Backends.S3.Signer do
   end
 
   defp credentials(opts) do
-    access_key = opts[:access_key_id] || System.get_env("AWS_ACCESS_KEY_ID") || raise "missing :access_key_id"
-    secret_key = opts[:secret_access_key] || System.get_env("AWS_SECRET_ACCESS_KEY") || raise "missing :secret_access_key"
+    access_key =
+      opts[:access_key_id] || System.get_env("AWS_ACCESS_KEY_ID") ||
+        raise "missing :access_key_id"
+
+    secret_key =
+      opts[:secret_access_key] || System.get_env("AWS_SECRET_ACCESS_KEY") ||
+        raise "missing :secret_access_key"
+
     region = opts[:region] || System.get_env("AWS_REGION") || "us-east-1"
     {access_key, secret_key, region}
   end

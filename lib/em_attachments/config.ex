@@ -17,17 +17,33 @@ defmodule EmAttachments.Config do
 
   def secret_key! do
     case all()[:secret_key] do
-      nil -> raise "EmAttachments: :secret_key is not configured under config :em_attachments, :config"
-      key -> key
+      nil ->
+        raise "EmAttachments: :secret_key is not configured under config :em_attachments, :config"
+
+      key ->
+        resolve_value(key)
     end
   end
 
-  def image_adapter do
-    all()[:image_adapter]
+  @doc """
+  Resolves a config value, expanding `{:env, "VAR_NAME"}` tuples via `System.get_env/1`.
+
+  Raises if the env var is not set and no default is given.
+  Accepts `{:env, "VAR"}` or `{:env, "VAR", default}`.
+  """
+  def resolve_value({:env, var}) when is_binary(var) do
+    System.get_env(var) ||
+      raise "EmAttachments: environment variable #{inspect(var)} is not set"
   end
 
-  def async_dispatcher do
-    all()[:async_dispatcher] || :inline
+  def resolve_value({:env, var, default}) when is_binary(var) do
+    System.get_env(var) || default
+  end
+
+  def resolve_value(value), do: value
+
+  defp resolve_opts(opts) do
+    Enum.map(opts, fn {k, v} -> {k, resolve_value(v)} end)
   end
 
   # nil or :default → use global config as-is
@@ -38,12 +54,23 @@ defmodule EmAttachments.Config do
       nil ->
         raise "EmAttachments: :#{type} backend is not configured under config :em_attachments, :config"
 
+      # Keyword list for :cache — inherit the store's adapter + opts, merge cache opts on top.
+      opts when is_list(opts) and type == :cache ->
+        {store_mod, store_opts} = resolve(:store, :default)
+        {store_mod, Keyword.merge(store_opts, resolve_opts(opts))}
+
       {mod, opts} ->
-        {mod, opts}
+        {mod, resolve_opts(opts)}
 
       mod when is_atom(mod) ->
         {mod, []}
     end
+  end
+
+  # Keyword list as uploader-level cache override — merge over the already-resolved global cache.
+  defp resolve(:cache, override_opts) when is_list(override_opts) do
+    {base_mod, base_opts} = resolve(:cache, :default)
+    {base_mod, Keyword.merge(base_opts, resolve_opts(override_opts))}
   end
 
   # {mod, opts} → merge with global opts, override module if given
@@ -61,6 +88,6 @@ defmodule EmAttachments.Config do
       raise "EmAttachments: no backend module resolved for :#{type}"
     end
 
-    {mod, Keyword.merge(global_opts, override_opts)}
+    {mod, Keyword.merge(resolve_opts(global_opts), resolve_opts(override_opts))}
   end
 end

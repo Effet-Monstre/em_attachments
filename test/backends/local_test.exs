@@ -23,6 +23,15 @@ defmodule EmAttachments.Backends.LocalTest do
     assert {:error, _} = Local.get("file2", opts)
   end
 
+  test "put accepts a BackendFile and downloads on demand", %{opts: opts} do
+    src = write_tmp("backend file content")
+    Local.put("bf-source", src, opts)
+    bf = EmAttachments.BackendFile.new(Local, opts, "bf-source", "test.txt", nil)
+    assert :ok = Local.put("bf-dest", bf, opts)
+    assert {:ok, "backend file content"} = Local.get("bf-dest", opts)
+    EmAttachments.BackendFile.cleanup(bf)
+  end
+
   test "url returns render_path/id", %{opts: opts} do
     assert {:ok, "/files/some-id"} = Local.url("some-id", opts)
   end
@@ -34,7 +43,7 @@ defmodule EmAttachments.Backends.LocalTest do
   defp write_tmp(content) do
     path = Path.join(System.tmp_dir!(), "src_#{unique()}")
     File.write!(path, content)
-    path
+    EmAttachments.TempFile.new(path, "test.txt")
   end
 
   defp unique, do: :crypto.strong_rand_bytes(4) |> Base.url_encode64(padding: false)
