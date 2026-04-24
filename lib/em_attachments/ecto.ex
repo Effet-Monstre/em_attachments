@@ -200,7 +200,9 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         %{storage: :cache} = cached_file ->
           call_opts = build_call_opts(opts)
 
-          prepare_changes(changeset, fn cs ->
+          changeset
+          |> force_change(key, cached_file)
+          |> prepare_changes(fn cs ->
             with {:ok, stored_file} <- uploader_for(cached_file).promote(cached_file, call_opts) do
               put_change(cs, key, stored_file)
             else

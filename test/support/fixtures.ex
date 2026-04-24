@@ -40,4 +40,27 @@ defmodule EmAttachments.Test.Fixtures do
   end
 
   def random, do: :crypto.strong_rand_bytes(4) |> Base.url_encode64(padding: false)
+
+  @doc """
+  Downloads a real JPEG from Wikimedia Commons and returns the local path.
+  Requires network access. Tag tests using this with @tag :external.
+  """
+  def real_jpeg_path do
+    download_to_tmp("https://httpbin.org/image/jpeg", "real_#{random()}.jpg")
+  end
+
+  @doc """
+  Downloads a real PNG from httpbin and returns the local path.
+  Requires network access. Tag tests using this with @tag :external.
+  """
+  def real_png_path do
+    download_to_tmp("https://httpbin.org/image/png", "real_#{random()}.png")
+  end
+
+  defp download_to_tmp(url, filename) do
+    %{status: 200, body: body} = Req.get!(url, decode_body: false)
+    path = Path.join(System.tmp_dir!(), filename)
+    File.write!(path, body)
+    path
+  end
 end

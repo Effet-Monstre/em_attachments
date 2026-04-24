@@ -27,6 +27,8 @@ defmodule EmAttachments.MixProject do
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
       {:ecto, "~> 3.11", optional: true},
+      {:ecto_sql, "~> 3.11", only: :test, optional: true},
+      {:postgrex, "~> 0.17", only: :test, optional: true},
       {:plug, "~> 1.16", optional: true},
       {:vix, "~> 0.35", optional: true},
       {:mogrify, "~> 0.9", optional: true},
