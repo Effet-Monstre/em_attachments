@@ -65,7 +65,9 @@ db_available? =
     false
   end
 
-if db_available? do
-  # Re-include :db by removing it from the exclude list (keep :external excluded)
-  ExUnit.configure(exclude: [:external])
-end
+excludes =
+  [:external]
+  |> then(fn e -> if db_available?, do: e, else: [:db | e] end)
+  |> then(fn e -> if s3_bucket, do: [:local_backend | e], else: e end)
+
+ExUnit.configure(exclude: excludes)

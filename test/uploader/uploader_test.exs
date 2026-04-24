@@ -61,6 +61,7 @@ defmodule EmAttachments.UploaderTest do
     assert url =~ stored.id
   end
 
+  @tag :local_backend
   test "url uses cache backend render_path for a cached file" do
     input = %{path: Fixtures.png_path(), filename: "logo.png"}
     {:ok, cached} = BasicUploader.upload(input)
@@ -71,6 +72,7 @@ defmodule EmAttachments.UploaderTest do
     refute String.starts_with?(url, "/files/store")
   end
 
+  @tag :local_backend
   test "url uses store backend render_path for a promoted file" do
     input = %{path: Fixtures.png_path(), filename: "logo.png"}
     {:ok, cached} = BasicUploader.upload(input)

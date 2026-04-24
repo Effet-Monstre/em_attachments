@@ -180,6 +180,7 @@ defmodule EmAttachments.EctoTest do
     assert cs.valid?
   end
 
+  @tag :local_backend
   test "nil param removes all derivative files from the store" do
     {:ok, cache_file} =
       DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "img.png"})
