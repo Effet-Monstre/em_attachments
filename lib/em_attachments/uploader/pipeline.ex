@@ -133,8 +133,8 @@ defmodule EmAttachments.Uploader.Pipeline do
     ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
 
     for {key, mod, plugin_opts} <- ordered,
-        function_exported?(mod, :destroy, 4) do
-      mod.destroy(file, key, {store_mod, store_opts}, plugin_opts)
+        function_exported?(mod, :destroy, 2) do
+      mod.destroy(file, %{plugin_key: key, plugin_opts: plugin_opts, backend: {store_mod, store_opts}})
     end
 
     store_mod.delete(file.id, store_opts)
@@ -178,10 +178,10 @@ defmodule EmAttachments.Uploader.Pipeline do
 
     plugin_url =
       Enum.reduce_while(ordered, :skip, fn {key, mod, plugin_opts}, _ ->
-        if function_exported?(mod, :url, 5) do
+        if function_exported?(mod, :url, 3) do
           plugin_call_opts = call_opts[key]
 
-          case mod.url(file, plugin_call_opts, key, plugin_opts, backend) do
+          case mod.url(file, plugin_call_opts, %{plugin_key: key, plugin_opts: plugin_opts, backend: backend}) do
             {:ok, url} -> {:halt, {:ok, url}}
             :skip -> {:cont, :skip}
           end
@@ -282,8 +282,8 @@ defmodule EmAttachments.Uploader.Pipeline do
 
       # init runs once per lifecycle — skipped if a prior-phase result already exists
       init_out =
-        if function_exported?(mod, :init, 5) and not Map.has_key?(results, key) do
-          mod.init(source, key, uploader, deps, plugin_opts)
+        if function_exported?(mod, :init, 2) and not Map.has_key?(results, key) do
+          mod.init(source, %{plugin_key: key, uploader: uploader, deps: deps, plugin_opts: plugin_opts})
         else
           :skip
         end
@@ -301,8 +301,8 @@ defmodule EmAttachments.Uploader.Pipeline do
             end
 
           upload_out =
-            if function_exported?(mod, :upload, 6) do
-              mod.upload(source, key, uploader, deps, plugin_opts, store_context)
+            if function_exported?(mod, :upload, 3) do
+              mod.upload(source, store_context, %{plugin_key: key, uploader: uploader, deps: deps, plugin_opts: plugin_opts})
             else
               :skip
             end
@@ -367,11 +367,11 @@ defmodule EmAttachments.Uploader.Pipeline do
     errors =
       Enum.flat_map(validations, fn {plugin_key, validation_opts} ->
         with {mod, compile_opts} <- find_plugin(ordered_plugins, plugin_key),
-             true <- function_exported?(mod, :validate, 4) do
+             true <- function_exported?(mod, :validate, 3) do
           plugin_opts = merge_plugin_opts(compile_opts, call_opts, plugin_key)
           own_result = plugin_results[plugin_key] || %{}
 
-          case mod.validate(validation_opts, source, own_result, plugin_opts) do
+          case mod.validate(source, own_result, %{plugin_key: plugin_key, plugin_opts: plugin_opts, validation_opts: validation_opts}) do
             :ok -> []
             {:error, msg} when is_binary(msg) -> [msg]
             {:error, msgs} when is_list(msgs) -> msgs

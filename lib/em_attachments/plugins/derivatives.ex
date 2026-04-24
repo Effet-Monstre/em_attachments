@@ -56,16 +56,13 @@ defmodule EmAttachments.Plugins.Derivatives do
   # meaning a separate store handler exists (copy_to_store: false).
   def upload(
         source,
-        plugin_key,
-        uploader,
-        _deps,
-        _plugin_opts,
-        {:cache, backend_mod, backend_opts}
+        {:cache, backend_mod, backend_opts},
+        ctx
       ) do
-    if not function_exported?(uploader, :handle, 2) do
+    if not function_exported?(ctx.uploader, :handle, 2) do
       :skip
     else
-      case try_cache_handle(uploader, plugin_key, source) do
+      case try_cache_handle(ctx.uploader, ctx.plugin_key, source) do
         {map, copy_to_store} when is_map(map) ->
           case upload_derivatives(map, backend_mod, backend_opts, :cache) do
             {:ok, uploaded} -> {:ok, %{variants: uploaded, copy_to_store: copy_to_store}}
@@ -83,13 +80,10 @@ defmodule EmAttachments.Plugins.Derivatives do
   # so deps[plugin_key] contains our own cache-phase metadata.
   def upload(
         source,
-        plugin_key,
-        uploader,
-        deps,
-        _plugin_opts,
-        {:store, backend_mod, backend_opts}
+        {:store, backend_mod, backend_opts},
+        ctx
       ) do
-    own_cache = deps[plugin_key] || %{}
+    own_cache = ctx.deps[ctx.plugin_key] || %{}
 
     cond do
       # Nothing was generated during cache phase — skip
@@ -114,7 +108,7 @@ defmodule EmAttachments.Plugins.Derivatives do
             )
 
           _ ->
-            case uploader.handle(plugin_key, %{file: source}) do
+            case ctx.uploader.handle(ctx.plugin_key, %{file: source}) do
               map when is_map(map) -> do_upload_to_store(map, backend_mod, backend_opts)
               :skip -> :skip
             end
@@ -122,7 +116,7 @@ defmodule EmAttachments.Plugins.Derivatives do
 
       # Cache-specific handler was used — try store-specific, then fall back to generic
       true ->
-        case try_store_handle(uploader, plugin_key, source) do
+        case try_store_handle(ctx.uploader, ctx.plugin_key, source) do
           map when is_map(map) -> do_upload_to_store(map, backend_mod, backend_opts)
           :skip -> :skip
         end
@@ -130,8 +124,9 @@ defmodule EmAttachments.Plugins.Derivatives do
   end
 
   @impl true
-  def destroy(file, plugin_key, {backend_mod, backend_opts}, _plugin_opts) do
-    own_data = get_in(file.metadata, [:plugins, plugin_key]) || %{}
+  def destroy(file, ctx) do
+    {backend_mod, backend_opts} = ctx.backend
+    own_data = get_in(file.metadata, [:plugins, ctx.plugin_key]) || %{}
 
     collect_store_ids(own_data)
     |> Enum.each(fn id -> backend_mod.delete(id, backend_opts) end)
@@ -140,10 +135,11 @@ defmodule EmAttachments.Plugins.Derivatives do
   end
 
   @impl true
-  def url(_file, nil, _plugin_key, _plugin_opts, _backend), do: :skip
+  def url(_file, nil, _ctx), do: :skip
 
-  def url(file, path, plugin_key, _plugin_opts, {backend_mod, backend_opts}) when is_list(path) do
-    plugin_data = get_in(file.metadata, [:plugins, plugin_key]) || %{}
+  def url(file, path, ctx) when is_list(path) do
+    {backend_mod, backend_opts} = ctx.backend
+    plugin_data = get_in(file.metadata, [:plugins, ctx.plugin_key]) || %{}
     derivatives = plugin_data[:variants] || %{}
 
     result =
@@ -166,7 +162,7 @@ defmodule EmAttachments.Plugins.Derivatives do
     end
   end
 
-  def url(_, _, _, _, _), do: :skip
+  def url(_, _, _), do: :skip
 
   # ---------------------------------------------------------------------------
   # Private

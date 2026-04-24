@@ -59,13 +59,13 @@ defmodule EmAttachments.Test.InitAndUploadPlugin do
   use EmAttachments.Plugin
 
   @impl true
-  def init(_source, _key, _uploader, _deps, _opts) do
+  def init(_source, _ctx) do
     {:ok, %{from_init: true}}
   end
 
   @impl true
-  def upload(_source, key, _uploader, deps, _opts, {storage, _, _}) do
-    from_init = deps[key][:from_init]
+  def upload(_source, {storage, _, _}, ctx) do
+    from_init = ctx.deps[ctx.plugin_key][:from_init]
     {:ok, %{saw_init: from_init == true, storage: storage, from_init: from_init}}
   end
 end

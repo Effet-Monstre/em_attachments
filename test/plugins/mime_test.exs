@@ -4,7 +4,7 @@ defmodule EmAttachments.Plugins.MimeTest do
   alias EmAttachments.{Plugins.Mime, TempFile}
   alias EmAttachments.Test.Fixtures
 
-  defp cache_upload(tf), do: Mime.init(tf, :mime, nil, %{}, [])
+  defp cache_upload(tf), do: Mime.init(tf, %{plugin_key: :mime, uploader: nil, deps: %{}, plugin_opts: []})
 
   defp tmp_file(content, name) do
     path =
@@ -17,7 +17,7 @@ defmodule EmAttachments.Plugins.MimeTest do
     TempFile.new(path, name)
   end
 
-  describe "init/5 (cache phase)" do
+  describe "init/2 (cache phase)" do
     test "detects PNG from magic bytes" do
       tf = TempFile.new(Fixtures.png_path(), "image.png")
       assert {:ok, %{type: "image/png", extension: "png"}} = cache_upload(tf)
@@ -89,68 +89,37 @@ defmodule EmAttachments.Plugins.MimeTest do
     end
   end
 
+  defp validate(validation_opts, own_result),
+    do: Mime.validate(nil, own_result, %{plugin_key: :mime, plugin_opts: [], validation_opts: validation_opts})
 
-  describe "validate/4" do
+  describe "validate/3" do
     test "passes when type is in allowed list" do
-      assert :ok =
-               Mime.validate(
-                 [type: ~w(image/png)],
-                 nil,
-                 %{type: "image/png", extension: "png"},
-                 []
-               )
+      assert :ok = validate([type: ~w(image/png)], %{type: "image/png", extension: "png"})
     end
 
     test "fails when type is not in allowed list" do
-      assert {:error, msg} =
-               Mime.validate(
-                 [type: ~w(image/png)],
-                 nil,
-                 %{type: "image/jpeg", extension: "jpg"},
-                 []
-               )
-
+      assert {:error, msg} = validate([type: ~w(image/png)], %{type: "image/jpeg", extension: "jpg"})
       assert msg =~ "image/jpeg"
     end
 
     test "passes when extension is in allowed list" do
-      assert :ok =
-               Mime.validate(
-                 [extension: ~w(png jpg)],
-                 nil,
-                 %{type: "image/png", extension: "png"},
-                 []
-               )
+      assert :ok = validate([extension: ~w(png jpg)], %{type: "image/png", extension: "png"})
     end
 
     test "fails when extension is not in allowed list" do
-      assert {:error, msg} =
-               Mime.validate(
-                 [extension: ~w(png)],
-                 nil,
-                 %{type: "image/jpeg", extension: "jpg"},
-                 []
-               )
-
+      assert {:error, msg} = validate([extension: ~w(png)], %{type: "image/jpeg", extension: "jpg"})
       assert msg =~ "jpg"
     end
 
     test "accumulates multiple errors" do
-      result =
-        Mime.validate(
-          [type: ~w(image/png), extension: ~w(png)],
-          nil,
-          %{type: "image/gif", extension: "gif"},
-          []
-        )
-
+      result = validate([type: ~w(image/png), extension: ~w(png)], %{type: "image/gif", extension: "gif"})
       assert {:error, errors} = result
       assert is_list(errors)
       assert length(errors) == 2
     end
 
     test "no validation opts always passes" do
-      assert :ok = Mime.validate([], nil, %{type: "anything", extension: "any"}, [])
+      assert :ok = validate([], %{type: "anything", extension: "any"})
     end
   end
 end

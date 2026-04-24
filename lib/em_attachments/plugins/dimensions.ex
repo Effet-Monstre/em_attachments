@@ -15,10 +15,10 @@ defmodule EmAttachments.Plugins.Dimensions do
   use EmAttachments.Plugin
 
   @impl true
-  def init(source, _plugin_key, _uploader, _deps, opts) do
+  def init(source, ctx) do
     path = EmAttachments.SourceFile.local_path!(source)
 
-    case opts[:adapter] do
+    case ctx.plugin_opts[:adapter] do
       nil ->
         {:error, "dimensions plugin requires an adapter: opt — pass a module or fn/1"}
 
@@ -35,16 +35,16 @@ defmodule EmAttachments.Plugins.Dimensions do
   end
 
   @impl true
-  def validate(validation_opts, _temp_file, own_result, _plugin_opts) do
+  def validate(_source, own_result, ctx) do
     w = own_result[:width] || 0
     h = own_result[:height] || 0
 
     errors =
       []
-      |> validate_bound(:max_width, w, validation_opts[:max_width], :lte)
-      |> validate_bound(:min_width, w, validation_opts[:min_width], :gte)
-      |> validate_bound(:max_height, h, validation_opts[:max_height], :lte)
-      |> validate_bound(:min_height, h, validation_opts[:min_height], :gte)
+      |> validate_bound(:max_width, w, ctx.validation_opts[:max_width], :lte)
+      |> validate_bound(:min_width, w, ctx.validation_opts[:min_width], :gte)
+      |> validate_bound(:max_height, h, ctx.validation_opts[:max_height], :lte)
+      |> validate_bound(:min_height, h, ctx.validation_opts[:min_height], :gte)
 
     case errors do
       [] -> :ok

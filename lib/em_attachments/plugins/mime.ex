@@ -12,7 +12,7 @@ defmodule EmAttachments.Plugins.Mime do
   use EmAttachments.Plugin
 
   @impl true
-  def init(source, _plugin_key, _uploader, _deps, _plugin_opts) do
+  def init(source, _ctx) do
     case detect(EmAttachments.SourceFile.local_path!(source)) do
       {:ok, {type, ext}} -> {:ok, %{type: type, extension: ext}}
       {:error, _} = err -> err
@@ -20,11 +20,11 @@ defmodule EmAttachments.Plugins.Mime do
   end
 
   @impl true
-  def validate(validation_opts, _temp_file, own_result, _plugin_opts) do
+  def validate(_source, own_result, ctx) do
     errors =
       []
-      |> check_type(validation_opts[:type], own_result[:type])
-      |> check_extension(validation_opts[:extension], own_result[:extension])
+      |> check_type(ctx.validation_opts[:type], own_result[:type])
+      |> check_extension(ctx.validation_opts[:extension], own_result[:extension])
 
     case errors do
       [] -> :ok

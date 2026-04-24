@@ -37,23 +37,19 @@ defmodule EmAttachments.Plugins.DerivativesTest do
     def handle(_, _), do: :skip
   end
 
+  defp upload_ctx(uploader, deps \\ %{}),
+    do: %{plugin_key: :derivatives, uploader: uploader, deps: deps, plugin_opts: []}
+
   # ---------------------------------------------------------------------------
-  # upload/6 — cache phase
+  # upload/3 — cache phase
   # ---------------------------------------------------------------------------
 
-  describe "upload/6 (cache phase)" do
+  describe "upload/3 (cache phase)" do
     test "returns variants with copy_to_store: true for generic handler", %{backend: {mod, opts}} do
       tf = TempFile.new(Fixtures.png_path(), "img.png")
 
       assert {:ok, %{variants: %{copy: %{id: _, storage: :cache}}, copy_to_store: true}} =
-               Derivatives.upload(
-                 tf,
-                 :derivatives,
-                 UploaderWithDerivatives,
-                 %{},
-                 [],
-                 {:cache, mod, opts}
-               )
+               Derivatives.upload(tf, {:cache, mod, opts}, upload_ctx(UploaderWithDerivatives))
     end
 
     test "returns variants with copy_to_store: false for cache-specific handler",
@@ -61,54 +57,33 @@ defmodule EmAttachments.Plugins.DerivativesTest do
       tf = TempFile.new(Fixtures.png_path(), "img.png")
 
       assert {:ok, %{variants: %{thumb: _}, copy_to_store: false}} =
-               Derivatives.upload(
-                 tf,
-                 :derivatives,
-                 UploaderWithStoreDerivatives,
-                 %{},
-                 [],
-                 {:cache, mod, opts}
-               )
+               Derivatives.upload(tf, {:cache, mod, opts}, upload_ctx(UploaderWithStoreDerivatives))
     end
 
     test "returns :skip when uploader has no handle/2", %{backend: {mod, opts}} do
       tf = TempFile.new(Fixtures.png_path(), "img.png")
-
-      assert :skip =
-               Derivatives.upload(tf, :derivatives, __MODULE__, %{}, [], {:cache, mod, opts})
+      assert :skip = Derivatives.upload(tf, {:cache, mod, opts}, upload_ctx(__MODULE__))
     end
   end
 
   # ---------------------------------------------------------------------------
-  # upload/6 — store phase
+  # upload/3 — store phase
   # ---------------------------------------------------------------------------
 
-  describe "upload/6 (store phase)" do
+  describe "upload/3 (store phase)" do
     test "re-runs generic handler and uploads to store when copy_to_store: true", %{
       backend: {mod, opts}
     } do
       tf = TempFile.new(Fixtures.png_path(), "img.png")
 
       {:ok, cache_data} =
-        Derivatives.upload(
-          tf,
-          :derivatives,
-          UploaderWithDerivatives,
-          %{},
-          [],
-          {:cache, mod, opts}
-        )
-
-      deps = %{derivatives: cache_data}
+        Derivatives.upload(tf, {:cache, mod, opts}, upload_ctx(UploaderWithDerivatives))
 
       assert {:ok, %{variants: %{copy: %{id: _, storage: :store}}}} =
                Derivatives.upload(
                  tf,
-                 :derivatives,
-                 UploaderWithDerivatives,
-                 deps,
-                 [],
-                 {:store, mod, opts}
+                 {:store, mod, opts},
+                 upload_ctx(UploaderWithDerivatives, %{derivatives: cache_data})
                )
     end
 
@@ -116,25 +91,13 @@ defmodule EmAttachments.Plugins.DerivativesTest do
       tf = TempFile.new(Fixtures.png_path(), "img.png")
 
       {:ok, cache_data} =
-        Derivatives.upload(
-          tf,
-          :derivatives,
-          UploaderWithStoreDerivatives,
-          %{},
-          [],
-          {:cache, mod, opts}
-        )
-
-      deps = %{derivatives: cache_data}
+        Derivatives.upload(tf, {:cache, mod, opts}, upload_ctx(UploaderWithStoreDerivatives))
 
       assert {:ok, %{variants: %{full: %{id: _, storage: :store}}}} =
                Derivatives.upload(
                  tf,
-                 :derivatives,
-                 UploaderWithStoreDerivatives,
-                 deps,
-                 [],
-                 {:store, mod, opts}
+                 {:store, mod, opts},
+                 upload_ctx(UploaderWithStoreDerivatives, %{derivatives: cache_data})
                )
     end
 
@@ -142,14 +105,7 @@ defmodule EmAttachments.Plugins.DerivativesTest do
       tf = TempFile.new(Fixtures.png_path(), "img.png")
 
       assert :skip =
-               Derivatives.upload(
-                 tf,
-                 :derivatives,
-                 UploaderWithDerivatives,
-                 %{},
-                 [],
-                 {:store, mod, opts}
-               )
+               Derivatives.upload(tf, {:store, mod, opts}, upload_ctx(UploaderWithDerivatives))
     end
 
     test "copies cached derivatives to store without re-running handler when source is BackendFile",
@@ -157,23 +113,21 @@ defmodule EmAttachments.Plugins.DerivativesTest do
       tf = TempFile.new(Fixtures.png_path(), "img.png")
 
       {:ok, cache_data} =
-        Derivatives.upload(tf, :derivatives, UploaderWithDerivatives, %{}, [],
-          {:cache, mod, opts})
+        Derivatives.upload(tf, {:cache, mod, opts}, upload_ctx(UploaderWithDerivatives))
 
       assert cache_data.copy_to_store == true
       %{copy: %{id: cache_deriv_id}} = cache_data.variants
 
-      # Use a BackendFile as source (as the pipeline does during promotion)
       bf = BackendFile.new(mod, opts, "original-id", "img.png", nil)
-      deps = %{derivatives: cache_data}
 
       assert {:ok, %{variants: %{copy: %{id: store_deriv_id, storage: :store}}}} =
-               Derivatives.upload(bf, :derivatives, UploaderWithDerivatives, deps, [],
-                 {:store, mod, opts})
+               Derivatives.upload(
+                 bf,
+                 {:store, mod, opts},
+                 upload_ctx(UploaderWithDerivatives, %{derivatives: cache_data})
+               )
 
-      # New store ID was allocated (not the same as cache derivative ID)
       refute store_deriv_id == cache_deriv_id
-      # Store file exists with the cached content
       assert File.exists?(Path.join(opts[:fs_path], store_deriv_id))
 
       BackendFile.cleanup(bf)
@@ -181,31 +135,21 @@ defmodule EmAttachments.Plugins.DerivativesTest do
   end
 
   # ---------------------------------------------------------------------------
-  # destroy/4
+  # destroy/2
   # ---------------------------------------------------------------------------
 
-  describe "destroy/4" do
+  describe "destroy/2" do
     test "deletes all stored derivative assets", %{backend: {mod, opts} = backend} do
       tf = TempFile.new(Fixtures.png_path(), "img.png")
 
       {:ok, cache_data} =
-        Derivatives.upload(
-          tf,
-          :derivatives,
-          UploaderWithDerivatives,
-          %{},
-          [],
-          {:cache, mod, opts}
-        )
+        Derivatives.upload(tf, {:cache, mod, opts}, upload_ctx(UploaderWithDerivatives))
 
       {:ok, store_data} =
         Derivatives.upload(
           tf,
-          :derivatives,
-          UploaderWithDerivatives,
-          %{derivatives: cache_data},
-          [],
-          {:store, mod, opts}
+          {:store, mod, opts},
+          upload_ctx(UploaderWithDerivatives, %{derivatives: cache_data})
         )
 
       file = %{
@@ -215,7 +159,8 @@ defmodule EmAttachments.Plugins.DerivativesTest do
         uploader: "T"
       }
 
-      assert :ok = Derivatives.destroy(file, :derivatives, backend, [])
+      assert :ok =
+               Derivatives.destroy(file, %{plugin_key: :derivatives, plugin_opts: [], backend: backend})
 
       for {_key, %{id: id}} <- store_data do
         refute File.exists?(Path.join(opts[:fs_path], id))
@@ -224,10 +169,10 @@ defmodule EmAttachments.Plugins.DerivativesTest do
   end
 
   # ---------------------------------------------------------------------------
-  # url/5
+  # url/3
   # ---------------------------------------------------------------------------
 
-  describe "url/5" do
+  describe "url/3" do
     test "returns derivative URL when path navigates to a stored file", %{backend: backend} do
       file = %{
         id: "main",
@@ -240,12 +185,14 @@ defmodule EmAttachments.Plugins.DerivativesTest do
         uploader: "T"
       }
 
-      assert {:ok, url} = Derivatives.url(file, [:copy], :derivatives, [], backend)
+      ctx = %{plugin_key: :derivatives, plugin_opts: [], backend: backend}
+      assert {:ok, url} = Derivatives.url(file, [:copy], ctx)
       assert url =~ "deriv-id"
     end
 
     test "returns :skip when plugin_call_opts is nil" do
-      assert :skip = Derivatives.url(%{}, nil, :derivatives, [], {Local, []})
+      ctx = %{plugin_key: :derivatives, plugin_opts: [], backend: {Local, []}}
+      assert :skip = Derivatives.url(%{}, nil, ctx)
     end
 
     test "returns :skip when derivative not found" do
@@ -256,14 +203,13 @@ defmodule EmAttachments.Plugins.DerivativesTest do
         uploader: "T"
       }
 
-      assert :skip =
-               Derivatives.url(
-                 file,
-                 [:missing],
-                 :derivatives,
-                 [],
-                 {Local, [fs_path: "/tmp", render_path: "/f"]}
-               )
+      ctx = %{
+        plugin_key: :derivatives,
+        plugin_opts: [],
+        backend: {Local, [fs_path: "/tmp", render_path: "/f"]}
+      }
+
+      assert :skip = Derivatives.url(file, [:missing], ctx)
     end
   end
 
