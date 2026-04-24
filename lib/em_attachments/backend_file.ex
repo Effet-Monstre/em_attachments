@@ -14,12 +14,7 @@ defmodule EmAttachments.BackendFile do
       _path  = EmAttachments.SourceFile.local_path!(source)   # cached, no download
       BackendFile.cleanup(source)
 
-  ## Backend `open/3` callback
-
-  Backends may implement the optional `open/3` callback to return a custom
-  `SourceFile` struct. For example, `LocalBackend.open/3` can return a `TempFile`
-  pointing directly to the stored path, avoiding any download entirely.
-  """
+"""
 
   use Agent
 

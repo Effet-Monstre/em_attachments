@@ -32,8 +32,14 @@ defmodule EmAttachments.Plugin do
   @optional_callbacks [init: 5, upload: 6, validate: 4, destroy: 4, url: 5]
 
   @doc """
-  Simplified alternative to `upload/6` for plugins that only need to run during the cache phase.
-  When defined, `upload/6` is injected automatically: cache calls delegate here, store returns `:skip`.
+  Runs once per upload lifecycle, in the cache phase only.
+
+  If this plugin's result is already in the accumulator (i.e. the file is in the store phase
+  and the cache-phase result was seeded in), `init/5` is skipped. The result is placed into
+  `deps` under this plugin's own key before `upload/6` is called, so `upload/6` can build on it.
+
+  When both `init/5` and `upload/6` are defined: `upload/6` result takes precedence; if
+  `upload/6` returns `:skip`, the `init/5` result is used.
   """
   @callback init(
               source :: EmAttachments.SourceFile.t(),

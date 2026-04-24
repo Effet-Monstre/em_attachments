@@ -4,15 +4,11 @@ defprotocol EmAttachments.SourceFile do
 
   Implemented by:
 
-  - `EmAttachments.TempFile` — already-local file, `local_path!/1` is a no-op
+  - `EmAttachments.TempFile` — already-local file, `local_path!/1` is a direct field read
   - `Plug.Upload` — already-local upload, `local_path!/1` returns `upload.path` directly
     (no copying into a separate tmp file)
   - `EmAttachments.BackendFile` — lazy remote file that downloads on the first
     `local_path!/1` call and caches the result; subsequent calls are instant
-
-  Backends may implement the optional `open/3` callback to return a custom
-  `SourceFile` (e.g. `LocalBackend` can point directly to the stored path without
-  any download at all).
 
   ## Usage in plugins and `handle/2`
 
