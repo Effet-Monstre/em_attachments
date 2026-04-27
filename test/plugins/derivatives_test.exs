@@ -1,7 +1,7 @@
 defmodule EmAttachments.Plugins.DerivativesTest do
   use ExUnit.Case, async: true
 
-  alias EmAttachments.{Plugins.Derivatives, SourceFile, TempFile, BackendFile, Backends.Local}
+  alias EmAttachments.{Plugins.Derivatives, SourceFile, TempFile, MemoryFile, BackendFile, Backends.Local}
   alias EmAttachments.Test.Fixtures
 
   setup do
@@ -17,6 +17,47 @@ defmodule EmAttachments.Plugins.DerivativesTest do
     def handle(:derivatives, %{file: file}) do
       content = File.read!(SourceFile.local_path!(file))
       %{copy: content}
+    end
+
+    def handle(_, _), do: :skip
+  end
+
+  # Returns a TempFile directly from handle/2.
+  defmodule UploaderWithTempFileDerivative do
+    def handle(:derivatives, %{file: file}) do
+      input = SourceFile.local_path!(file)
+      output = Path.join(System.tmp_dir!(), "deriv_tf_#{unique()}.copy")
+      File.cp!(input, output)
+      %{processed: TempFile.new(output, "processed")}
+    end
+
+    def handle(_, _), do: :skip
+    defp unique, do: :crypto.strong_rand_bytes(4) |> Base.url_encode64(padding: false)
+  end
+
+  # Returns a MemoryFile directly from handle/2.
+  defmodule UploaderWithMemoryFileDerivative do
+    def handle(:derivatives, %{file: file}) do
+      data = File.read!(SourceFile.local_path!(file))
+      %{processed: MemoryFile.new(data, "processed")}
+    end
+
+    def handle(_, _), do: :skip
+  end
+
+  # Returns {:cmd, ...} tuple — path auto-provided by plugin.
+  defmodule UploaderWithCmdDerivative do
+    def handle(:derivatives, _) do
+      %{copy: {:cmd, "cp", [:input, :output]}}
+    end
+
+    def handle(_, _), do: :skip
+  end
+
+  # Returns {:cmd_stdout, ...} tuple — stdout captured as MemoryFile.
+  defmodule UploaderWithCmdStdoutDerivative do
+    def handle(:derivatives, _) do
+      %{content: {:cmd_stdout, "cat", [:input]}}
     end
 
     def handle(_, _), do: :skip
@@ -210,6 +251,62 @@ defmodule EmAttachments.Plugins.DerivativesTest do
       }
 
       assert :skip = Derivatives.url(file, [:missing], ctx)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # TempFile / MemoryFile / {:cmd} passthrough
+  # ---------------------------------------------------------------------------
+
+  describe "upload/3 — source passthrough types" do
+    test "accepts TempFile returned directly from handle/2", %{backend: {mod, opts}} do
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+
+      assert {:ok, %{variants: %{processed: %{id: _, storage: :cache}}, copy_to_store: true}} =
+               Derivatives.upload(
+                 tf,
+                 {:cache, mod, opts},
+                 upload_ctx(UploaderWithTempFileDerivative)
+               )
+    end
+
+    test "accepts MemoryFile returned directly from handle/2", %{backend: {mod, opts}} do
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+
+      assert {:ok, %{variants: %{processed: %{id: _, storage: :cache}}, copy_to_store: true}} =
+               Derivatives.upload(
+                 tf,
+                 {:cache, mod, opts},
+                 upload_ctx(UploaderWithMemoryFileDerivative)
+               )
+    end
+
+    test "{:cmd, ...} tuple auto-executes with input path supplied", %{backend: {mod, opts}} do
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+
+      assert {:ok, %{variants: %{copy: %{id: _, storage: :cache}}, copy_to_store: true}} =
+               Derivatives.upload(
+                 tf,
+                 {:cache, mod, opts},
+                 upload_ctx(UploaderWithCmdDerivative)
+               )
+    end
+
+    test "{:cmd_stdout, ...} tuple captures stdout as uploaded derivative", %{
+      backend: {mod, opts}
+    } do
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+
+      assert {:ok, %{variants: %{content: %{id: id, storage: :cache}}, copy_to_store: true}} =
+               Derivatives.upload(
+                 tf,
+                 {:cache, mod, opts},
+                 upload_ctx(UploaderWithCmdStdoutDerivative)
+               )
+
+      # Content should be the raw PNG bytes (cat'd from the input)
+      assert {:ok, stored_content} = Local.get(id, opts)
+      assert byte_size(stored_content) > 0
     end
   end
 

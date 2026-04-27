@@ -46,7 +46,7 @@ defmodule EmAttachments.Plugins.Derivatives do
 
   use EmAttachments.Plugin
 
-  alias EmAttachments.{BackendFile, TempFile, Util}
+  alias EmAttachments.{BackendFile, Cmd, MemoryFile, SourceFile, TempFile, Util}
 
   @impl true
   # Cache phase: generate and upload to cache backend.
@@ -64,7 +64,7 @@ defmodule EmAttachments.Plugins.Derivatives do
     else
       case try_cache_handle(ctx.uploader, ctx.plugin_key, source) do
         {map, copy_to_store} when is_map(map) ->
-          case upload_derivatives(map, backend_mod, backend_opts, :cache) do
+          case upload_derivatives(map, backend_mod, backend_opts, :cache, source) do
             {:ok, uploaded} -> {:ok, %{variants: uploaded, copy_to_store: copy_to_store}}
             {:error, _} = err -> err
           end
@@ -109,7 +109,7 @@ defmodule EmAttachments.Plugins.Derivatives do
 
           _ ->
             case ctx.uploader.handle(ctx.plugin_key, %{file: source}) do
-              map when is_map(map) -> do_upload_to_store(map, backend_mod, backend_opts)
+              map when is_map(map) -> do_upload_to_store(map, backend_mod, backend_opts, source)
               :skip -> :skip
             end
         end
@@ -117,7 +117,7 @@ defmodule EmAttachments.Plugins.Derivatives do
       # Cache-specific handler was used — try store-specific, then fall back to generic
       true ->
         case try_store_handle(ctx.uploader, ctx.plugin_key, source) do
-          map when is_map(map) -> do_upload_to_store(map, backend_mod, backend_opts)
+          map when is_map(map) -> do_upload_to_store(map, backend_mod, backend_opts, source)
           :skip -> :skip
         end
     end
@@ -188,8 +188,8 @@ defmodule EmAttachments.Plugins.Derivatives do
     end
   end
 
-  defp do_upload_to_store(map, backend_mod, backend_opts) do
-    case upload_derivatives(map, backend_mod, backend_opts, :store) do
+  defp do_upload_to_store(map, backend_mod, backend_opts, source) do
+    case upload_derivatives(map, backend_mod, backend_opts, :store, source) do
       {:ok, uploaded} -> {:ok, %{variants: uploaded}}
       err -> err
     end
@@ -242,19 +242,21 @@ defmodule EmAttachments.Plugins.Derivatives do
   end
 
   # Uploads a map of handler outputs in parallel.
+  # resolve_cmds expands {:cmd,...}/{:cmd_stdout,...} tuples using the source file.
   # build_pending converts binaries to TempFiles; nested maps are recursed.
-  # All leaf TempFiles are collected flat, uploaded concurrently, then the
-  # original tree shape is reconstructed from the results.
-  defp upload_derivatives(map, backend_mod, backend_opts, storage) when is_map(map) do
-    pending = build_pending(map)
+  # All leaf TempFiles/MemoryFiles are collected flat, uploaded concurrently, then
+  # the original tree shape is reconstructed from the results.
+  defp upload_derivatives(map, backend_mod, backend_opts, storage, source) when is_map(map) do
+    resolved = resolve_cmds(map, source)
+    pending = build_pending(resolved)
     flat = collect_items(pending)
 
     flat
     |> Task.async_stream(
-      fn {key_path, %TempFile{} = source} ->
+      fn {key_path, item} ->
         id = Util.random_id(8)
-        result = backend_mod.put(id, source, backend_opts)
-        if result == :ok, do: File.rm(source.path)
+        result = backend_mod.put(id, item, backend_opts)
+        if result == :ok, do: cleanup_source(item)
         {key_path, id, result}
       end,
       ordered: true
@@ -275,13 +277,14 @@ defmodule EmAttachments.Plugins.Derivatives do
     end
   end
 
-  # Flattens a pending map (built from build_pending) to [{[key_path], TempFile}].
+  # Flattens a pending map (built from build_pending) to [{[key_path], TempFile | MemoryFile}].
   defp collect_items(map, prefix \\ []) when is_map(map) do
     Enum.flat_map(map, fn {key, value} ->
       path = prefix ++ [key]
 
       case value do
         %TempFile{} = tf -> [{path, tf}]
+        %MemoryFile{} = mf -> [{path, mf}]
         nested when is_map(nested) -> collect_items(nested, path)
       end
     end)
@@ -302,6 +305,9 @@ defmodule EmAttachments.Plugins.Derivatives do
     Map.new(map, fn {k, v} -> {k, build_item(v)} end)
   end
 
+  defp build_item(%TempFile{} = tf), do: tf
+  defp build_item(%MemoryFile{} = mf), do: mf
+
   defp build_item(content) when is_binary(content) do
     path = Path.join(System.tmp_dir!(), "em_attach_#{Util.random_id(8)}")
     File.write!(path, content)
@@ -309,6 +315,32 @@ defmodule EmAttachments.Plugins.Derivatives do
   end
 
   defp build_item(map) when is_map(map), do: build_pending(map)
+
+  defp resolve_cmds(map, source) when is_map(map) do
+    Map.new(map, fn {k, v} -> {k, resolve_cmd_item(v, source)} end)
+  end
+
+  defp resolve_cmd_item({:cmd, cmd, args}, source),
+    do: resolve_cmd_item({:cmd, cmd, args, []}, source)
+
+  defp resolve_cmd_item({:cmd, cmd, args, opts}, source) do
+    Cmd.run!(cmd, args, SourceFile.local_path!(source), opts)
+  end
+
+  defp resolve_cmd_item({:cmd_stdout, cmd, args}, source),
+    do: resolve_cmd_item({:cmd_stdout, cmd, args, []}, source)
+
+  defp resolve_cmd_item({:cmd_stdout, cmd, args, opts}, source) do
+    Cmd.run_stdout!(cmd, args, SourceFile.local_path!(source), opts)
+  end
+
+  defp resolve_cmd_item(%TempFile{} = tf, _source), do: tf
+  defp resolve_cmd_item(%MemoryFile{} = mf, _source), do: mf
+  defp resolve_cmd_item(map, source) when is_map(map), do: resolve_cmds(map, source)
+  defp resolve_cmd_item(other, _source), do: other
+
+  defp cleanup_source(%TempFile{path: path}), do: File.rm(path)
+  defp cleanup_source(%MemoryFile{} = mf), do: MemoryFile.cleanup(mf)
 
   defp collect_store_ids(map) when is_map(map) do
     Enum.flat_map(map, fn {_k, v} ->

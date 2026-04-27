@@ -99,6 +99,16 @@ defimpl EmAttachments.SourceFile, for: EmAttachments.BackendFile do
 
   def fetch_local_path(source), do: EmAttachments.BackendFile.ensure_local(source)
 
+  def fetch_bytes(source) do
+    state = EmAttachments.BackendFile.state(source)
+
+    if state.local_path do
+      File.read(state.local_path)
+    else
+      state.backend_mod.get(state.id, state.backend_opts)
+    end
+  end
+
   def filename(source), do: EmAttachments.BackendFile.state(source).filename
   def size(source), do: EmAttachments.BackendFile.state(source).size
 end

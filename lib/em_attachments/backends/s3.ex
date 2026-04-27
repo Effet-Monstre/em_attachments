@@ -24,18 +24,12 @@ defmodule EmAttachments.Backends.S3 do
     if state.backend_mod == __MODULE__ and same_bucket?(state.backend_opts, opts) do
       copy_object(state.id, state.backend_opts, id, opts)
     else
-      case SourceFile.fetch_local_path(source) do
-        {:ok, path} -> do_put(id, path, opts)
-        {:error, _} = err -> err
-      end
+      do_put(id, source, opts)
     end
   end
 
   def put(id, source, opts) do
-    case SourceFile.fetch_local_path(source) do
-      {:ok, path} -> do_put(id, path, opts)
-      {:error, _} = err -> err
-    end
+    do_put(id, source, opts)
   end
 
   @impl true
@@ -108,15 +102,21 @@ defmodule EmAttachments.Backends.S3 do
     end
   end
 
-  defp do_put(id, path, opts) do
+  defp do_put(id, source, opts) do
     url = object_url(id, opts)
-    body = File.read!(path)
-    headers = Signer.sign_request(:put, url, acl_header(opts[:acl]), :unsigned, opts)
 
-    case Req.put(url, headers: headers, body: body) do
-      {:ok, %{status: s}} when s in 200..299 -> :ok
-      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
-      {:error, reason} -> {:error, reason}
+    case SourceFile.fetch_bytes(source) do
+      {:ok, body} ->
+        headers = Signer.sign_request(:put, url, acl_header(opts[:acl]), :unsigned, opts)
+
+        case Req.put(url, headers: headers, body: body) do
+          {:ok, %{status: s}} when s in 200..299 -> :ok
+          {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, _} = err ->
+        err
     end
   end
 
