@@ -87,6 +87,15 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         {:ok, %Plug.Upload{} = upload} ->
           handle_upload(changeset, key, upload, opts)
 
+        {:ok, {:url, url}} when is_binary(url) ->
+          handle_url_upload(changeset, key, url, opts)
+
+        {:ok, {:binary, data}} when is_binary(data) ->
+          handle_binary_upload(changeset, key, data, "upload", opts)
+
+        {:ok, {:binary, data, filename}} when is_binary(data) and is_binary(filename) ->
+          handle_binary_upload(changeset, key, data, filename, opts)
+
         {:ok, value} when is_binary(value) ->
           case Jason.decode(value) do
             {:ok, map} when is_map(map) -> handle_file_map(changeset, key, value, map, opts)
@@ -213,6 +222,58 @@ if Code.ensure_loaded?(Ecto.Changeset) do
 
         _ ->
           changeset
+      end
+    end
+
+    defp handle_url_upload(changeset, key, url, opts) do
+      filename =
+        case url |> URI.parse() |> Map.get(:path, "") |> Path.basename() do
+          "" -> "upload"
+          name -> name
+        end
+
+      case Req.get(url, decode_body: false) do
+        {:ok, %{status: 200, body: body}} ->
+          handle_source_upload(changeset, key, EmAttachments.MemoryFile.new(body, filename), opts)
+
+        {:ok, %{status: status}} ->
+          add_error(changeset, key, "download failed: HTTP #{status}")
+
+        {:error, reason} ->
+          add_error(changeset, key, "download failed: #{inspect(reason)}")
+      end
+    end
+
+    defp handle_binary_upload(changeset, key, data, filename, opts) do
+      handle_source_upload(changeset, key, EmAttachments.MemoryFile.new(data, filename), opts)
+    end
+
+    defp handle_source_upload(changeset, key, source, opts) do
+      uploader = changeset.types[key]
+
+      case uploader.upload(source) do
+        {:ok, cached_file} ->
+          call_opts = build_call_opts(opts)
+          prev_file = get_existing_file(changeset.data, key)
+
+          if opts[:promote] == false do
+            put_change(changeset, key, cached_file)
+          else
+            changeset
+            |> put_change(key, cached_file)
+            |> prepare_changes(fn cs ->
+              with {:ok, stored_file} <- uploader_for(cached_file).promote(cached_file, call_opts) do
+                if prev_file, do: delete_file(prev_file)
+                put_change(cs, key, stored_file)
+              else
+                {:error, reason} ->
+                  add_error(cs, key, "upload failed: #{inspect(reason)}")
+              end
+            end)
+          end
+
+        {:error, reason} ->
+          add_error(changeset, key, "upload failed: #{inspect(reason)}")
       end
     end
 

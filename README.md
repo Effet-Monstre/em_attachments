@@ -140,6 +140,9 @@ end
 | Param value | Behaviour |
 |---|---|
 | `%Plug.Upload{}` | Upload to cache; promote to store inside Ecto transaction |
+| `{:url, url}` | Download file from `url` (via `Req`), then upload and promote like a normal file. Filename is derived from the URL path. |
+| `{:binary, data}` | Treat `data` (raw bytes) as an in-memory file and run the upload pipeline. Filename defaults to `"upload"`. |
+| `{:binary, data, filename}` | Same as above but uses the given `filename`. |
 | `nil` or `""` | Delete existing file inside transaction; set field to `nil` |
 | Signed JSON string (from prior serialize call) | Re-submit cached file; promote on save |
 | Bare file ID string matching current field | No-op |

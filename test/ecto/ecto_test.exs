@@ -82,6 +82,82 @@ defmodule EmAttachments.EctoTest do
   end
 
   # ---------------------------------------------------------------------------
+  # {:binary, data} and {:binary, data, filename} uploads
+  # ---------------------------------------------------------------------------
+
+  test "upload via {:binary, bytes} caches and promotes the file on commit" do
+    data = File.read!(Fixtures.png_path())
+    params = %{"avatar" => {:binary, data}}
+    cs = changeset(%UserRecord{}, params) |> cast_attachments([:avatar])
+
+    assert cs.valid?
+    cached = get_change(cs, :avatar)
+    assert %BasicUploader{} = cached
+    assert cached.storage == :cache
+
+    cs2 = commit(cs)
+    assert cs2.valid?
+    assert get_change(cs2, :avatar).storage == :store
+  end
+
+  test "upload via {:binary, bytes, filename} uses the provided filename" do
+    data = File.read!(Fixtures.png_path())
+    params = %{"avatar" => {:binary, data, "custom.png"}}
+    cs = changeset(%UserRecord{}, params) |> cast_attachments([:avatar])
+
+    assert cs.valid?
+    cs2 = commit(cs)
+    assert get_change(cs2, :avatar).metadata.filename == "custom.png"
+  end
+
+  test "upload via {:binary, bytes} with invalid MIME type produces an invalid changeset" do
+    data = File.read!(Fixtures.txt_path())
+    params = %{"avatar" => {:binary, data}}
+    cs = changeset(%UserRecord{}, params) |> cast_attachments([:avatar])
+
+    refute cs.valid?
+    assert cs.errors[:avatar] != nil
+  end
+
+  test "upload via {:binary, bytes} with promote: false keeps file in cache" do
+    data = File.read!(Fixtures.png_path())
+    params = %{"avatar" => {:binary, data}}
+    cs = changeset(%UserRecord{}, params) |> cast_attachments([:avatar], promote: false)
+
+    assert cs.valid?
+    assert get_change(cs, :avatar).storage == :cache
+    assert cs.prepare == []
+  end
+
+  # ---------------------------------------------------------------------------
+  # {:url, url} uploads — requires network
+  # ---------------------------------------------------------------------------
+
+  @tag :external
+  test "upload via {:url, url} downloads, caches and promotes the file on commit" do
+    params = %{"avatar" => {:url, "https://httpbin.org/image/png"}}
+    cs = changeset(%UserRecord{}, params) |> cast_attachments([:avatar])
+
+    assert cs.valid?
+    cached = get_change(cs, :avatar)
+    assert %BasicUploader{} = cached
+    assert cached.storage == :cache
+
+    cs2 = commit(cs)
+    assert cs2.valid?
+    assert get_change(cs2, :avatar).storage == :store
+  end
+
+  @tag :external
+  test "upload via {:url, url} with bad HTTP status adds an error" do
+    params = %{"avatar" => {:url, "https://httpbin.org/status/404"}}
+    cs = changeset(%UserRecord{}, params) |> cast_attachments([:avatar])
+
+    refute cs.valid?
+    assert cs.errors[:avatar] != nil
+  end
+
+  # ---------------------------------------------------------------------------
   # Bare ID / JSON matching current file — no-op
   # ---------------------------------------------------------------------------
 

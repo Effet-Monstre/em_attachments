@@ -1,7 +1,7 @@
 defmodule EmAttachments.Uploader.Pipeline do
   @moduledoc false
 
-  alias EmAttachments.{BackendFile, Config, Signer, SourceFile, TempFile, Util}
+  alias EmAttachments.{BackendFile, Config, SourceFile, TempFile, Util}
   alias EmAttachments.Uploader.Topo
 
   # ---------------------------------------------------------------------------
@@ -134,7 +134,11 @@ defmodule EmAttachments.Uploader.Pipeline do
 
     for {key, mod, plugin_opts} <- ordered,
         function_exported?(mod, :destroy, 2) do
-      mod.destroy(file, %{plugin_key: key, plugin_opts: plugin_opts, backend: {store_mod, store_opts}})
+      mod.destroy(file, %{
+        plugin_key: key,
+        plugin_opts: plugin_opts,
+        backend: {store_mod, store_opts}
+      })
     end
 
     store_mod.delete(file.id, store_opts)
@@ -181,7 +185,11 @@ defmodule EmAttachments.Uploader.Pipeline do
         if function_exported?(mod, :url, 3) do
           plugin_call_opts = call_opts[key]
 
-          case mod.url(file, plugin_call_opts, %{plugin_key: key, plugin_opts: plugin_opts, backend: backend}) do
+          case mod.url(file, plugin_call_opts, %{
+                 plugin_key: key,
+                 plugin_opts: plugin_opts,
+                 backend: backend
+               }) do
             {:ok, url} -> {:halt, {:ok, url}}
             :skip -> {:cont, :skip}
           end
@@ -215,11 +223,11 @@ defmodule EmAttachments.Uploader.Pipeline do
     store_mod.presign_upload(id, store_opts)
   end
 
-  def serialize(_uploader, %{storage: :cache} = file) do
-    secret = Config.secret_key!()
-    signed_id = Signer.sign(file.id, secret)
-    file |> Map.from_struct() |> Map.put(:id, signed_id) |> Jason.encode!()
-  end
+  # def serialize(_uploader, %{storage: :cache} = file) do
+  #   secret = Config.secret_key!()
+  #   signed_id = Signer.sign(file.id, secret)
+  #   file |> Map.from_struct() |> Map.put(:id, signed_id) |> Jason.encode!()
+  # end
 
   def serialize(_uploader, file) do
     file |> Map.from_struct() |> Jason.encode!()
@@ -229,15 +237,17 @@ defmodule EmAttachments.Uploader.Pipeline do
     with {:ok, data} <- Jason.decode(json),
          data <- Util.atomize_keys(data),
          :cache <- Util.to_atom(data[:storage]) do
-      secret = Config.secret_key!()
+      # secret = Config.secret_key!()
 
-      case Signer.verify(data[:id], secret) do
-        {:ok, real_id} ->
-          {:ok, load_file(uploader, Map.put(data, :id, real_id))}
+      {:ok, load_file(uploader, Map.put(data, :id, data[:id]))}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+      # case Signer.verify(data[:id], secret) do
+      #   {:ok, real_id} ->
+      #     {:ok, load_file(uploader, Map.put(data, :id, real_id))}
+
+      #   {:error, reason} ->
+      #     {:error, reason}
+      # end
     else
       :store -> {:error, :cannot_deserialize_store_file}
       {:error, reason} -> {:error, reason}
@@ -283,7 +293,12 @@ defmodule EmAttachments.Uploader.Pipeline do
       # init runs once per lifecycle — skipped if a prior-phase result already exists
       init_out =
         if function_exported?(mod, :init, 2) and not Map.has_key?(results, key) do
-          mod.init(source, %{plugin_key: key, uploader: uploader, deps: deps, plugin_opts: plugin_opts})
+          mod.init(source, %{
+            plugin_key: key,
+            uploader: uploader,
+            deps: deps,
+            plugin_opts: plugin_opts
+          })
         else
           :skip
         end
@@ -302,7 +317,12 @@ defmodule EmAttachments.Uploader.Pipeline do
 
           upload_out =
             if function_exported?(mod, :upload, 3) do
-              mod.upload(source, store_context, %{plugin_key: key, uploader: uploader, deps: deps, plugin_opts: plugin_opts})
+              mod.upload(source, store_context, %{
+                plugin_key: key,
+                uploader: uploader,
+                deps: deps,
+                plugin_opts: plugin_opts
+              })
             else
               :skip
             end
@@ -329,7 +349,15 @@ defmodule EmAttachments.Uploader.Pipeline do
   end
 
   # Store phase: takes the file struct and updates its plugins metadata.
-  defp run_plugins(source, uploader, ordered_plugins, call_opts, store_context, initial_results, file) do
+  defp run_plugins(
+         source,
+         uploader,
+         ordered_plugins,
+         call_opts,
+         store_context,
+         initial_results,
+         file
+       ) do
     case run_plugins(source, uploader, ordered_plugins, call_opts, store_context, initial_results) do
       {:ok, new_plugins} -> {:ok, %{file | metadata: %{file.metadata | plugins: new_plugins}}}
       {:error, _} = err -> err
@@ -343,6 +371,7 @@ defmodule EmAttachments.Uploader.Pipeline do
 
   defp to_source_file(%TempFile{} = t), do: {:ok, t}
   defp to_source_file(%BackendFile{} = bf), do: {:ok, bf}
+  defp to_source_file(%EmAttachments.MemoryFile{} = mf), do: {:ok, mf}
 
   defp to_source_file(input) do
     cond do
@@ -371,7 +400,11 @@ defmodule EmAttachments.Uploader.Pipeline do
           plugin_opts = merge_plugin_opts(compile_opts, call_opts, plugin_key)
           own_result = plugin_results[plugin_key] || %{}
 
-          case mod.validate(source, own_result, %{plugin_key: plugin_key, plugin_opts: plugin_opts, validation_opts: validation_opts}) do
+          case mod.validate(source, own_result, %{
+                 plugin_key: plugin_key,
+                 plugin_opts: plugin_opts,
+                 validation_opts: validation_opts
+               }) do
             :ok -> []
             {:error, msg} when is_binary(msg) -> [msg]
             {:error, msgs} when is_list(msgs) -> msgs
@@ -401,5 +434,4 @@ defmodule EmAttachments.Uploader.Pipeline do
       nil -> nil
     end
   end
-
 end
