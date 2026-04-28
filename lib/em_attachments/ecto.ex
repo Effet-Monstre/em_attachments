@@ -111,26 +111,12 @@ if Code.ensure_loaded?(Ecto.Changeset) do
     end
 
     defp handle_upload(changeset, key, upload, opts) do
-      call_opts = build_call_opts(opts)
       changeset_ = cast(changeset, %{key => upload}, [key])
 
       if changeset_.valid? do
         cached_file = get_change(changeset_, key)
         prev_file = get_existing_file(changeset_.data, key)
-
-        if opts[:promote] == false do
-          changeset_
-        else
-          prepare_changes(changeset_, fn cs ->
-            with {:ok, stored_file} <- uploader_for(cached_file).promote(cached_file, call_opts) do
-              if prev_file, do: delete_file(prev_file)
-              put_change(cs, key, stored_file)
-            else
-              {:error, reason} ->
-                add_error(cs, key, "upload failed: #{inspect(reason)}")
-            end
-          end)
-        end
+        schedule_promote(changeset_, key, cached_file, prev_file, opts)
       else
         changeset_
       end
@@ -159,24 +145,8 @@ if Code.ensure_loaded?(Ecto.Changeset) do
 
       case uploader.deserialize(json) do
         {:ok, cached_file} ->
-          call_opts = build_call_opts(opts)
           prev_file = get_existing_file(changeset.data, key)
-
-          if opts[:promote] == false do
-            put_change(changeset, key, cached_file)
-          else
-            changeset_ = put_change(changeset, key, cached_file)
-
-            prepare_changes(changeset_, fn cs ->
-              with {:ok, stored_file} <- uploader.promote(cached_file, call_opts) do
-                if prev_file, do: delete_file(prev_file)
-                put_change(cs, key, stored_file)
-              else
-                {:error, reason} ->
-                  add_error(cs, key, "promote failed: #{inspect(reason)}")
-              end
-            end)
-          end
+          schedule_promote(changeset, key, cached_file, prev_file, opts)
 
         {:error, reason} ->
           add_error(changeset, key, "invalid attachment: #{inspect(reason)}")
@@ -253,27 +223,31 @@ if Code.ensure_loaded?(Ecto.Changeset) do
 
       case uploader.upload(source) do
         {:ok, cached_file} ->
-          call_opts = build_call_opts(opts)
           prev_file = get_existing_file(changeset.data, key)
-
-          if opts[:promote] == false do
-            put_change(changeset, key, cached_file)
-          else
-            changeset
-            |> put_change(key, cached_file)
-            |> prepare_changes(fn cs ->
-              with {:ok, stored_file} <- uploader_for(cached_file).promote(cached_file, call_opts) do
-                if prev_file, do: delete_file(prev_file)
-                put_change(cs, key, stored_file)
-              else
-                {:error, reason} ->
-                  add_error(cs, key, "upload failed: #{inspect(reason)}")
-              end
-            end)
-          end
+          schedule_promote(changeset, key, cached_file, prev_file, opts)
 
         {:error, reason} ->
           add_error(changeset, key, "upload failed: #{inspect(reason)}")
+      end
+    end
+
+    defp schedule_promote(changeset, key, cached_file, prev_file, opts) do
+      call_opts = build_call_opts(opts)
+
+      if opts[:promote] == false do
+        put_change(changeset, key, cached_file)
+      else
+        changeset
+        |> put_change(key, cached_file)
+        |> prepare_changes(fn cs ->
+          with {:ok, stored_file} <- uploader_for(cached_file).promote(cached_file, call_opts) do
+            if prev_file, do: delete_file(prev_file)
+            put_change(cs, key, stored_file)
+          else
+            {:error, reason} ->
+              add_error(cs, key, "upload failed: #{inspect(reason)}")
+          end
+        end)
       end
     end
 
