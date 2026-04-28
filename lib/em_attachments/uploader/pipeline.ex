@@ -373,18 +373,15 @@ defmodule EmAttachments.Uploader.Pipeline do
   defp to_source_file(%BackendFile{} = bf), do: {:ok, bf}
   defp to_source_file(%EmAttachments.MemoryFile{} = mf), do: {:ok, mf}
 
-  defp to_source_file(input) do
-    cond do
-      Code.ensure_loaded?(Plug.Upload) and match?(%Plug.Upload{}, input) ->
-        {:ok, input}
-
-      is_map(input) and (Map.has_key?(input, :path) or Map.has_key?(input, "path")) ->
-        {:ok, TempFile.from_map(input)}
-
-      true ->
-        {:error, :invalid_input}
+  defp to_source_file(input) when is_map(input) do
+    if Map.has_key?(input, :path) or Map.has_key?(input, "path") do
+      {:ok, TempFile.from_map(input)}
+    else
+      {:error, :invalid_input}
     end
   end
+
+  defp to_source_file(_), do: {:error, :invalid_input}
 
   defp build_deps(declared_deps, plugin_results) do
     Map.new(declared_deps, fn {dep_key, _dep_mod} ->

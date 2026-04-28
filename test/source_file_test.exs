@@ -27,36 +27,6 @@ defmodule EmAttachments.SourceFileTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Plug.Upload implementation (only when Plug is available)
-  # ---------------------------------------------------------------------------
-
-  if Code.ensure_loaded?(Plug.Upload) do
-    describe "SourceFile - Plug.Upload" do
-      test "local_path!/1 returns the upload path without copying" do
-        path = Fixtures.png_path()
-        upload = %Plug.Upload{path: path, filename: "img.png", content_type: "image/png"}
-        assert SourceFile.local_path!(upload) == path
-      end
-
-      test "filename/1 returns the upload filename" do
-        upload = %Plug.Upload{
-          path: Fixtures.txt_path(),
-          filename: "report.csv",
-          content_type: "text/csv"
-        }
-
-        assert SourceFile.filename(upload) == "report.csv"
-      end
-
-      test "size/1 stats the file on disk" do
-        path = Fixtures.txt_path("hello")
-        upload = %Plug.Upload{path: path, filename: "f.txt", content_type: "text/plain"}
-        assert SourceFile.size(upload) == 5
-      end
-    end
-  end
-
-  # ---------------------------------------------------------------------------
   # BackendFile implementation
   # ---------------------------------------------------------------------------
 

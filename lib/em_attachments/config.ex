@@ -15,6 +15,35 @@ defmodule EmAttachments.Config do
     resolve(:cache, uploader_opts[:cache])
   end
 
+  @doc """
+  Returns the default plugins prepended to every uploader's plugin list.
+
+  Built-in defaults include the three cast plugins (PlugUpload when Plug is
+  available, UrlUpload, Binary). Override entirely with:
+
+      config :em_attachments, :config, default_plugins: [...]
+
+  Set to `[]` to opt out of all defaults.
+  """
+  def default_plugins do
+    case all()[:default_plugins] do
+      nil ->
+        plug =
+          if Code.ensure_loaded?(Plug.Upload),
+            do: [plug_upload: EmAttachments.Plugins.PlugUpload],
+            else: []
+
+        plug ++
+          [
+            url_upload: EmAttachments.Plugins.UrlUpload,
+            binary: EmAttachments.Plugins.Binary
+          ]
+
+      list ->
+        list
+    end
+  end
+
   def secret_key! do
     case all()[:secret_key] do
       nil ->

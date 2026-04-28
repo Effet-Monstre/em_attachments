@@ -84,41 +84,17 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         {:ok, value} when value in [nil, ""] ->
           handle_delete(changeset, key)
 
-        {:ok, %Plug.Upload{} = upload} ->
-          handle_upload(changeset, key, upload, opts)
-
-        {:ok, {:url, url}} when is_binary(url) ->
-          handle_url_upload(changeset, key, url, opts)
-
-        {:ok, {:binary, data}} when is_binary(data) ->
-          handle_binary_upload(changeset, key, data, "upload", opts)
-
-        {:ok, {:binary, data, filename}} when is_binary(data) and is_binary(filename) ->
-          handle_binary_upload(changeset, key, data, filename, opts)
-
         {:ok, value} when is_binary(value) ->
           case Jason.decode(value) do
             {:ok, map} when is_map(map) -> handle_file_map(changeset, key, value, map, opts)
             {:error, _} -> handle_bare_id(changeset, key, value)
           end
 
-        {:ok, value} when is_map(value) ->
+        {:ok, value} when is_map(value) and not is_struct(value) ->
           handle_file_map(changeset, key, Jason.encode!(value), value, opts)
 
-        {:ok, _} ->
-          add_error(changeset, key, "invalid attachment")
-      end
-    end
-
-    defp handle_upload(changeset, key, upload, opts) do
-      changeset_ = cast(changeset, %{key => upload}, [key])
-
-      if changeset_.valid? do
-        cached_file = get_change(changeset_, key)
-        prev_file = get_existing_file(changeset_.data, key)
-        schedule_promote(changeset_, key, cached_file, prev_file, opts)
-      else
-        changeset_
+        {:ok, value} ->
+          handle_with_plugins(changeset, key, value, opts)
       end
     end
 
@@ -195,29 +171,6 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       end
     end
 
-    defp handle_url_upload(changeset, key, url, opts) do
-      filename =
-        case url |> URI.parse() |> Map.get(:path, "") |> Path.basename() do
-          "" -> "upload"
-          name -> name
-        end
-
-      case Req.get(url, decode_body: false) do
-        {:ok, %{status: 200, body: body}} ->
-          handle_source_upload(changeset, key, EmAttachments.MemoryFile.new(body, filename), opts)
-
-        {:ok, %{status: status}} ->
-          add_error(changeset, key, "download failed: HTTP #{status}")
-
-        {:error, reason} ->
-          add_error(changeset, key, "download failed: #{inspect(reason)}")
-      end
-    end
-
-    defp handle_binary_upload(changeset, key, data, filename, opts) do
-      handle_source_upload(changeset, key, EmAttachments.MemoryFile.new(data, filename), opts)
-    end
-
     defp handle_source_upload(changeset, key, source, opts) do
       uploader = changeset.types[key]
 
@@ -228,6 +181,30 @@ if Code.ensure_loaded?(Ecto.Changeset) do
 
         {:error, reason} ->
           add_error(changeset, key, "upload failed: #{inspect(reason)}")
+      end
+    end
+
+    defp handle_with_plugins(changeset, key, value, opts) do
+      uploader = changeset.types[key]
+      plugins = uploader.__uploader_plugins__()
+
+      result =
+        Enum.find_value(plugins, :no_cast, fn {plugin_key, plugin_mod, plugin_opts} ->
+          if function_exported?(plugin_mod, :cast, 2) do
+            ctx = %{uploader: uploader, plugin_key: plugin_key, plugin_opts: plugin_opts}
+
+            case plugin_mod.cast(value, ctx) do
+              {:ok, _} = ok -> ok
+              {:error, _} = err -> err
+              :skip -> nil
+            end
+          end
+        end)
+
+      case result do
+        {:ok, source} -> handle_source_upload(changeset, key, source, opts)
+        {:error, reason} -> add_error(changeset, key, reason)
+        :no_cast -> add_error(changeset, key, "invalid attachment")
       end
     end
 

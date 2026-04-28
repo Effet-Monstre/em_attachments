@@ -30,7 +30,17 @@ defmodule EmAttachments.Plugin do
       end
   """
 
-  @optional_callbacks [init: 2, upload: 3, validate: 3, destroy: 2, url: 3]
+  @optional_callbacks [cast: 2, init: 2, upload: 3, validate: 3, destroy: 2, url: 3]
+
+  @doc """
+  Called by `cast_attachments` before the upload pipeline to convert a raw changeset
+  value into a `SourceFile`. Return `{:ok, source}` to claim the value, `:skip` to
+  pass it to the next plugin, or `{:error, message}` to fail with that message.
+  """
+  @callback cast(
+              value :: term(),
+              ctx :: %{uploader: module(), plugin_key: atom(), plugin_opts: keyword()}
+            ) :: {:ok, EmAttachments.SourceFile.t()} | :skip | {:error, String.t()}
 
   @doc """
   Runs once per upload lifecycle, in the cache phase only.

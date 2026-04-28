@@ -38,7 +38,7 @@ if Code.ensure_loaded?(Plug.Conn) do
           conn |> put_status(422) |> json(%{error: "no file uploaded"}) |> halt()
 
         upload ->
-          case uploader.upload(upload) do
+          case uploader.upload(EmAttachments.TempFile.from_plug(upload)) do
             {:ok, file} ->
               json_body = uploader.serialize(file)
               conn |> put_resp_content_type("application/json") |> send_resp(200, json_body)

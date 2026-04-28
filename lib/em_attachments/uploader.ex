@@ -135,10 +135,18 @@ defmodule EmAttachments.Uploader do
       |> Module.get_attribute(:em_validations, [])
       |> Enum.reverse()
 
-    plugins =
+    declared =
       env.module
       |> Module.get_attribute(:em_plugins, [])
       |> Enum.reverse()
+
+    declared_keys = MapSet.new(declared, &elem(&1, 0))
+
+    defaults =
+      EmAttachments.Config.default_plugins()
+      |> Enum.reject(fn {key, _} -> MapSet.member?(declared_keys, key) end)
+
+    plugins = defaults ++ declared
 
     normalized = Topo.normalize_plugins(plugins)
 
@@ -155,27 +163,10 @@ defmodule EmAttachments.Uploader do
 
     ecto_code =
       if Code.ensure_loaded?(Ecto.Type) do
-        plug_cast =
-          if Code.ensure_loaded?(Plug.Upload) do
-            quote do
-              def cast(%Plug.Upload{} = upload) do
-                case __MODULE__.upload(upload) do
-                  {:ok, file} -> {:ok, file}
-                  {:error, reason} -> {:error, [message: "upload failed: #{inspect(reason)}"]}
-                end
-              end
-            end
-          else
-            quote do
-            end
-          end
-
         quote do
           use Ecto.Type
 
           def type, do: :map
-
-          unquote(plug_cast)
 
           def cast(json) when is_binary(json) do
             case __MODULE__.deserialize(json) do

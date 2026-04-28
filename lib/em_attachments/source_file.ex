@@ -73,12 +73,3 @@ defimpl EmAttachments.SourceFile, for: EmAttachments.TempFile do
   def size(source), do: source.size
 end
 
-if Code.ensure_loaded?(Plug.Upload) do
-  defimpl EmAttachments.SourceFile, for: Plug.Upload do
-    def local_path!(source), do: source.path
-    def fetch_local_path(source), do: {:ok, source.path}
-    def fetch_bytes(source), do: File.read(source.path)
-    def filename(source), do: source.filename
-    def size(source), do: File.stat!(source.path).size
-  end
-end
