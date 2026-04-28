@@ -135,18 +135,10 @@ defmodule EmAttachments.Uploader do
       |> Module.get_attribute(:em_validations, [])
       |> Enum.reverse()
 
-    declared =
+    plugins =
       env.module
       |> Module.get_attribute(:em_plugins, [])
       |> Enum.reverse()
-
-    declared_keys = MapSet.new(declared, &elem(&1, 0))
-
-    defaults =
-      EmAttachments.Config.default_plugins()
-      |> Enum.reject(fn {key, _} -> MapSet.member?(declared_keys, key) end)
-
-    plugins = defaults ++ declared
 
     normalized = Topo.normalize_plugins(plugins)
 
@@ -204,6 +196,21 @@ defmodule EmAttachments.Uploader do
     quote do
       def __validations__, do: unquote(validations)
       def __uploader_plugins__, do: unquote(Macro.escape(normalized))
+
+      def __cast_plugins__ do
+        declared = __uploader_plugins__()
+        declared_keys = MapSet.new(declared, &elem(&1, 0))
+
+        defaults =
+          EmAttachments.Config.default_plugins()
+          |> Enum.map(fn
+            {k, mod} when is_atom(mod) -> {k, mod, []}
+            {k, {mod, plugin_opts}} -> {k, mod, plugin_opts}
+          end)
+          |> Enum.reject(fn {k, _, _} -> MapSet.member?(declared_keys, k) end)
+
+        defaults ++ declared
+      end
 
       def upload(input, call_opts \\ []) do
         EmAttachments.Uploader.Pipeline.upload(__MODULE__, input, call_opts)

@@ -186,11 +186,10 @@ if Code.ensure_loaded?(Ecto.Changeset) do
 
     defp handle_with_plugins(changeset, key, value, opts) do
       uploader = changeset.types[key]
-      plugins = uploader.__uploader_plugins__()
 
       result =
-        Enum.find_value(plugins, :no_cast, fn {plugin_key, plugin_mod, plugin_opts} ->
-          if function_exported?(plugin_mod, :cast, 2) do
+        Enum.find_value(uploader.__cast_plugins__(), :no_cast, fn {plugin_key, plugin_mod, plugin_opts} ->
+          if Code.ensure_loaded?(plugin_mod) and function_exported?(plugin_mod, :cast, 2) do
             ctx = %{uploader: uploader, plugin_key: plugin_key, plugin_opts: plugin_opts}
 
             case plugin_mod.cast(value, ctx) do
