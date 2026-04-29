@@ -21,3 +21,8 @@ em_attachments-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# VitePress docs
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
