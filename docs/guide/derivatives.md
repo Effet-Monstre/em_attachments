@@ -97,13 +97,60 @@ end
 For tools that write to **stdout** instead of a file, use `{:cmd_stdout, …}`:
 
 ```elixir
-def handle(:derivatives, %{file: file}) do
-  # pdftotext: extract text to stdout
+def handle(:derivatives, _) do
   %{
-    text: {:cmd_stdout, "pdftotext", [:input, "-"]}
+    # pdftotext: extract plain text
+    text: {:cmd_stdout, "pdftotext", [:input, "-"]},
+
+    # ImageMagick: resize and stream as PNG
+    thumb: {:cmd_stdout, "magick", [:input, "-resize", "200x", "png:-"]},
+
+    # ffmpeg: first video frame as JPEG via the pipe protocol
+    still: {:cmd_stdout, "ffmpeg", ["-i", :input, "-frames:v", "1", "-f", "image2", "pipe:1"]}
   }
 end
 ```
+
+The captured output is held in memory as a `MemoryFile`. No temporary output file is written to disk before the derivative is stored on the backend.
+
+### Choosing between `:cmd` and `:cmd_stdout`
+
+| | `:cmd` | `:cmd_stdout` |
+|---|---|---|
+| Output location | Temp file on disk | In-memory `MemoryFile` |
+| Tool requirement | Accepts an output path | Writes to stdout |
+| Format inference | From `:output` file extension | Must be explicit in the args |
+| `:ext` option | Required for most tools | Not applicable |
+| Example tools | ffmpeg (to file), Mogrify | pdftotext, `magick png:-` |
+
+### No-temp-file pipeline with binary input
+
+When the source is binary data — an API payload, a buffer from another operation — supply it as `{:binary, data}` or `{:binary, data, filename}`:
+
+```elixir
+result = MyUploader.upload({:binary, png_bytes, "photo.png"})
+```
+
+Combined with `:cmd_stdout`, this keeps the entire flow — input to derivative to backend — free of user-visible temp files:
+
+1. `{:binary, data}` creates a `MemoryFile` (data held in memory only).
+2. When `:cmd_stdout` runs, the `MemoryFile` is written to a managed temp path just long enough for `:input` substitution.
+3. The command's stdout is captured into a new `MemoryFile`.
+4. That `MemoryFile` is passed directly to `backend.put` — no second disk write.
+
+```elixir
+def handle(:derivatives, _) do
+  %{thumb: {:cmd_stdout, "magick", [:input, "-resize", "200x", "png:-"]}}
+end
+```
+
+```elixir
+# Somewhere in your application:
+png_bytes = fetch_image_from_api()
+{:ok, file} = MyUploader.upload({:binary, png_bytes, "photo.png"})
+```
+
+With a `{:binary, …}` source and `:cmd_stdout` derivatives, neither the input nor any derivative ever has a user-visible file path.
 
 ### Cmd tuple shapes
 
@@ -123,9 +170,10 @@ end
 
 **Options:**
 
-| Option | Description |
-|---|---|
-| `:ext` | Output file extension including the dot, e.g. `".jpg"`. Required for most `:cmd` uses — tools like ffmpeg and ImageMagick infer format from the extension. |
+| Option | Applies to | Description |
+|---|---|---|
+| `:ext` | `:cmd` | Output file extension including the dot, e.g. `".jpg"`. Required for most `:cmd` uses — tools infer format from the extension. |
+| `:filename` | `:cmd_stdout` | Filename stored in the resulting `MemoryFile`. Defaults to `"derivative"`. |
 
 ---
 
@@ -155,7 +203,18 @@ end
 
 `EmAttachments.Cmd.run/4` returns `{:ok, TempFile.t()}` on success. Pass the `TempFile` directly as a map value — the plugin handles cleanup.
 
-`EmAttachments.Cmd.run_stdout/4` returns `{:ok, MemoryFile.t()}` and captures stdout.
+`EmAttachments.Cmd.run_stdout/4` returns `{:ok, MemoryFile.t()}` and captures stdout. Use it when you need conditional logic around a stdout-producing command:
+
+```elixir
+def handle(:derivatives, %{file: file}) do
+  path = EmAttachments.SourceFile.local_path!(file)
+
+  case EmAttachments.Cmd.run_stdout("pdftotext", [:input, "-"], path) do
+    {:ok, mf}  -> %{text: mf}   # MemoryFile — accepted directly
+    {:error, _} -> :skip        # no text derivative if extraction fails
+  end
+end
+```
 
 ### Error returns
 
@@ -163,7 +222,7 @@ end
 |---|---|
 | `{:error, :command_not_found}` | Executable not on PATH |
 | `{:error, :non_zero_exit}` | Command exited with non-zero code |
-| `{:error, :no_output}` | Command exited 0 but wrote nothing to the output path |
+| `{:error, :no_output}` | Command exited 0 but wrote nothing to the output path (`:cmd` only) |
 
 ---
 

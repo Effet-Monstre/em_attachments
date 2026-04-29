@@ -6,7 +6,7 @@ defmodule EmAttachments.EctoRepoTest do
   import Ecto.Changeset
   import EmAttachments.Ecto
 
-  alias EmAttachments.Test.{Repo, DbUser, BasicUploader, Fixtures}
+  alias EmAttachments.Test.{Repo, DbUser, BasicUploader, CmdStdoutDbUser, Fixtures}
 
   setup do
     :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
@@ -247,6 +247,41 @@ defmodule EmAttachments.EctoRepoTest do
 
     loaded = Repo.get!(DbUser, user.id)
     assert loaded.avatar.storage == :store
+  end
+
+  # ── :cmd_stdout derivative with binary input ───────────────────────────────
+
+  test "binary {:binary, data} input + :cmd_stdout derivative: stored in DB, content is valid PNG" do
+    png_data = Fixtures.proper_png()
+
+    cs =
+      CmdStdoutDbUser.changeset(%{"name" => "Thumb User", "avatar" => {:binary, png_data, "photo.png"}})
+      |> cast_attachments([:avatar])
+
+    assert cs.valid?
+    assert get_change(cs, :avatar).storage == :cache
+
+    {:ok, user} = Repo.insert(cs)
+    assert user.avatar.storage == :store
+    assert user.avatar.metadata.plugins.mime.type == "image/png"
+
+    # Derivative metadata is persisted.
+    thumb = user.avatar.metadata.plugins.derivatives.variants.thumb
+    assert thumb.storage == :store
+
+    # Derivative file content on disk is a valid PNG.
+    if match?({EmAttachments.Backends.Local, _}, EmAttachments.Config.store()) do
+      {_mod, store_opts} = EmAttachments.Config.store()
+      content = File.read!(Path.join(store_opts[:fs_path], thumb.id))
+      assert <<0x89, ?P, ?N, ?G, _::binary>> = content
+    end
+
+    # Round-trip through DB: derivative IDs survive serialisation.
+    loaded = Repo.get!(CmdStdoutDbUser, user.id)
+    assert loaded.avatar.storage == :store
+    loaded_thumb = loaded.avatar.metadata.plugins.derivatives.variants.thumb
+    assert loaded_thumb.id == thumb.id
+    assert loaded_thumb.storage == :store
   end
 
   # ── Helpers ────────────────────────────────────────────────────────────────

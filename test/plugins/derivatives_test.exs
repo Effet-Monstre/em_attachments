@@ -63,6 +63,15 @@ defmodule EmAttachments.Plugins.DerivativesTest do
     def handle(_, _), do: :skip
   end
 
+  # Uses an image tool via :cmd_stdout to generate a resized PNG derivative.
+  defmodule UploaderWithImageResize do
+    def handle(:derivatives, _) do
+      %{thumb: {:cmd_stdout, "magick", [:input, "-resize", "5x5!", "png:-"]}}
+    end
+
+    def handle(_, _), do: :skip
+  end
+
   # Phase-specific handlers — different derivatives per phase.
   defmodule UploaderWithStoreDerivatives do
     def handle(:derivatives, %{file: file, store: :cache}) do
@@ -307,6 +316,49 @@ defmodule EmAttachments.Plugins.DerivativesTest do
       # Content should be the raw PNG bytes (cat'd from the input)
       assert {:ok, stored_content} = Local.get(id, opts)
       assert byte_size(stored_content) > 0
+    end
+
+    test "{:cmd_stdout, magick resize} generates PNG thumbnail from binary MemoryFile input",
+         %{backend: {mod, opts}} do
+      # Provide PNG as a MemoryFile (binary) — no temp file exists on disk yet.
+      mf = MemoryFile.new(Fixtures.proper_png(), "photo.png")
+
+      assert {:ok, %{variants: %{thumb: %{id: id, storage: :cache}}, copy_to_store: true}} =
+               Derivatives.upload(mf, {:cache, mod, opts}, upload_ctx(UploaderWithImageResize))
+
+      # The derivative is stored as a valid PNG (magick's 5×5 resize output).
+      assert {:ok, stored} = Local.get(id, opts)
+      assert <<0x89, ?P, ?N, ?G, _::binary>> = stored
+
+      MemoryFile.cleanup(mf)
+    end
+
+    test "{:cmd_stdout, magick resize} full cache→store pipeline from binary input",
+         %{backend: {mod, opts}} do
+      mf = MemoryFile.new(Fixtures.proper_png(), "photo.png")
+
+      {:ok, cache_data} =
+        Derivatives.upload(mf, {:cache, mod, opts}, upload_ctx(UploaderWithImageResize))
+
+      assert %{thumb: %{id: cache_id, storage: :cache}} = cache_data.variants
+
+      {:ok, store_data} =
+        Derivatives.upload(
+          mf,
+          {:store, mod, opts},
+          upload_ctx(UploaderWithImageResize, %{derivatives: cache_data})
+        )
+
+      assert %{thumb: %{id: store_id, storage: :store}} = store_data.variants
+      refute store_id == cache_id
+
+      # Both cache and store derivatives contain valid PNG output.
+      assert {:ok, cached_bytes} = Local.get(cache_id, opts)
+      assert {:ok, stored_bytes} = Local.get(store_id, opts)
+      assert <<0x89, ?P, ?N, ?G, _::binary>> = cached_bytes
+      assert <<0x89, ?P, ?N, ?G, _::binary>> = stored_bytes
+
+      MemoryFile.cleanup(mf)
     end
   end
 

@@ -22,6 +22,19 @@ defmodule EmAttachments.Test.NoPluginUploader do
   use EmAttachments.Uploader
 end
 
+defmodule EmAttachments.Test.CmdStdoutDerivativeUploader do
+  use EmAttachments.Uploader
+
+  plugin mime: EmAttachments.Plugins.Mime
+  plugin derivatives: EmAttachments.Plugins.Derivatives
+
+  validates mime: [type: ~w(image/png image/jpeg)]
+
+  def handle(:derivatives, _) do
+    %{thumb: {:cmd_stdout, "magick", [:input, "-resize", "5x5!", "png:-"]}}
+  end
+end
+
 # Returns fixed 800×600 for any file — lets dimension validation tests run
 # without needing a real image decoder installed.
 defmodule EmAttachments.Test.FixedDimensionsAdapter do
@@ -84,6 +97,17 @@ if Code.ensure_loaded?(Ecto.Schema) do
     embedded_schema do
       field(:name, :string)
       field(:avatar, EmAttachments.Test.DerivativeUploader)
+    end
+  end
+
+  defmodule EmAttachments.Test.CmdStdoutRecord do
+    use Ecto.Schema
+
+    @primary_key {:id, :binary_id, autogenerate: true}
+
+    embedded_schema do
+      field(:name, :string)
+      field(:avatar, EmAttachments.Test.CmdStdoutDerivativeUploader)
     end
   end
 
