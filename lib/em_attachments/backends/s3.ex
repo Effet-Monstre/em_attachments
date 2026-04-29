@@ -277,7 +277,11 @@ defmodule EmAttachments.Backends.S3 do
           end)
 
         {_, src_opts, _, _} = hd(group)
-        do_bulk_delete(keys, bucket, src_opts)
+
+        case do_bulk_delete(keys, bucket, src_opts) do
+          :ok -> {:cont, :ok}
+          err -> {:halt, err}
+        end
       end)
 
     copy_result =
