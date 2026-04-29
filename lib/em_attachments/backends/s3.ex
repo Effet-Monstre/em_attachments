@@ -35,21 +35,8 @@ defmodule EmAttachments.Backends.S3 do
   alias EmAttachments.Backends.S3.{CacheRegistry, Signer}
 
   @impl true
-  def put(id, %BackendFile{} = source, opts) do
-    state = BackendFile.state(source)
-
-    if state.backend_mod == __MODULE__ and same_bucket?(state.backend_opts, opts) do
-      copy_object(state.id, state.backend_opts, id, opts)
-    else
-      do_put(id, source, opts)
-    end
-  end
-
   def put(id, source, opts) do
-    with :ok <- do_put(id, source, opts),
-         :ok <- maybe_write_sentinel(id, opts) do
-      :ok
-    end
+    bulk_put([{id, source}], opts)
   end
 
   @impl true
@@ -117,17 +104,34 @@ defmodule EmAttachments.Backends.S3 do
 
   @impl true
   def bulk_put(files, opts) do
-    files
-    |> Task.async_stream(
-      fn {id, source} -> put(id, source, opts) end,
-      max_concurrency: System.schedulers_online() * 2,
-      ordered: false
-    )
-    |> Enum.reduce_while(:ok, fn
-      {:ok, :ok}, _ -> {:cont, :ok}
-      {:ok, {:error, _} = err}, _ -> {:halt, err}
-      {:exit, reason}, _ -> {:halt, {:error, {:task_exit, reason}}}
-    end)
+    {bf_files, put_files} =
+      Enum.split_with(files, fn {_id, source} ->
+        match?(%BackendFile{}, source) and
+          BackendFile.state(source).backend_mod == __MODULE__ and
+          same_bucket?(BackendFile.state(source).backend_opts, opts)
+      end)
+
+    copies =
+      Enum.map(bf_files, fn {id, source} ->
+        state = BackendFile.state(source)
+        {state.id, state.backend_opts, id, opts}
+      end)
+
+    with :ok <- copy_objects(copies),
+         :ok <-
+           (put_files
+            |> Task.async_stream(
+              fn {id, source} -> put_one(id, source, opts) end,
+              max_concurrency: System.schedulers_online() * 2,
+              ordered: false
+            )
+            |> Enum.reduce_while(:ok, fn
+              {:ok, :ok}, _ -> {:cont, :ok}
+              {:ok, {:error, _} = err}, _ -> {:halt, err}
+              {:exit, reason}, _ -> {:halt, {:error, {:task_exit, reason}}}
+            end)) do
+      :ok
+    end
   end
 
   @doc false
@@ -155,6 +159,17 @@ defmodule EmAttachments.Backends.S3 do
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
+
+  defp put_one(id, %BackendFile{} = source, opts) do
+    do_put(id, source, opts)
+  end
+
+  defp put_one(id, source, opts) do
+    with :ok <- do_put(id, source, opts),
+         :ok <- maybe_write_sentinel(id, opts) do
+      :ok
+    end
+  end
 
   defp object_url(id, opts) do
     bucket = Keyword.fetch!(opts, :bucket)
@@ -228,10 +243,6 @@ defmodule EmAttachments.Backends.S3 do
     end
   end
 
-  defp delete_sentinel(id, opts) do
-    do_delete(sentinel_url(id, opts), opts)
-  end
-
   defp do_delete(url, opts) do
     headers = Signer.sign_request(:delete, url, %{}, :unsigned, opts)
 
@@ -242,20 +253,49 @@ defmodule EmAttachments.Backends.S3 do
     end
   end
 
-  # S3 server-side copy — no local download needed when source and dest share a bucket.
-  defp copy_object(source_id, source_opts, dest_id, dest_opts) do
-    if source_opts[:policy] == :cache and
-         source_id == dest_id and
-         (source_opts[:prefix] || "uploads") == (dest_opts[:prefix] || "uploads") do
-      # Promotion: file already in place at the store location.
-      # Cancel the timer and clean up the sentinel here; cache_mod.delete/3 is a no-op.
-      bucket = Keyword.fetch!(source_opts, :bucket)
-      CacheRegistry.cancel(bucket, source_id)
-      delete_sentinel(source_id, source_opts)
-      :ok
-    else
-      do_copy_object(source_id, source_opts, dest_id, dest_opts)
-    end
+  defp copy_objects([]), do: :ok
+
+  defp copy_objects(copies) do
+    {promotions, actual_copies} =
+      Enum.split_with(copies, fn {src_id, src_opts, dst_id, dst_opts} ->
+        src_opts[:policy] == :cache and
+          src_id == dst_id and
+          (src_opts[:prefix] || "uploads") == (dst_opts[:prefix] || "uploads")
+      end)
+
+    Enum.each(promotions, fn {src_id, src_opts, _, _} ->
+      CacheRegistry.cancel(Keyword.fetch!(src_opts, :bucket), src_id)
+    end)
+
+    sentinel_result =
+      promotions
+      |> Enum.group_by(fn {_, src_opts, _, _} -> Keyword.fetch!(src_opts, :bucket) end)
+      |> Enum.reduce_while(:ok, fn {bucket, group}, _ ->
+        keys =
+          Enum.map(group, fn {src_id, src_opts, _, _} ->
+            "#{src_opts[:prefix] || "uploads"}/cache/#{src_id}"
+          end)
+
+        {_, src_opts, _, _} = hd(group)
+        do_bulk_delete(keys, bucket, src_opts)
+      end)
+
+    copy_result =
+      actual_copies
+      |> Task.async_stream(
+        fn {src_id, src_opts, dst_id, dst_opts} ->
+          do_copy_object(src_id, src_opts, dst_id, dst_opts)
+        end,
+        max_concurrency: System.schedulers_online() * 2,
+        ordered: false
+      )
+      |> Enum.reduce_while(:ok, fn
+        {:ok, :ok}, _ -> {:cont, :ok}
+        {:ok, {:error, _} = err}, _ -> {:halt, err}
+        {:exit, reason}, _ -> {:halt, {:error, {:task_exit, reason}}}
+      end)
+
+    with :ok <- sentinel_result, do: copy_result
   end
 
   defp do_copy_object(source_id, source_opts, dest_id, dest_opts) do
