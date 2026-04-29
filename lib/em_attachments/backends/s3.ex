@@ -67,9 +67,7 @@ defmodule EmAttachments.Backends.S3 do
   @impl true
   def delete(id, opts) do
     if opts[:policy] == :cache do
-      bucket = Keyword.fetch!(opts, :bucket)
-      CacheRegistry.cancel(bucket, id)
-      delete_sentinel(id, opts)
+      :ok
     else
       do_delete(object_url(id, opts), opts)
     end
@@ -250,9 +248,10 @@ defmodule EmAttachments.Backends.S3 do
          source_id == dest_id and
          (source_opts[:prefix] || "uploads") == (dest_opts[:prefix] || "uploads") do
       # Promotion: file already in place at the store location.
-      # Cancel the timer early; the pipeline's cache_mod.delete/3 will remove the sentinel.
+      # Cancel the timer and clean up the sentinel here; cache_mod.delete/3 is a no-op.
       bucket = Keyword.fetch!(source_opts, :bucket)
       CacheRegistry.cancel(bucket, source_id)
+      delete_sentinel(source_id, source_opts)
       :ok
     else
       do_copy_object(source_id, source_opts, dest_id, dest_opts)

@@ -69,5 +69,6 @@ excludes =
   [:external]
   |> then(fn e -> if db_available?, do: e, else: [:db | e] end)
   |> then(fn e -> if s3_bucket, do: [:local_backend | e], else: e end)
+  |> then(fn e -> if s3_bucket, do: e, else: [:s3 | e] end)
 
 ExUnit.configure(exclude: excludes)

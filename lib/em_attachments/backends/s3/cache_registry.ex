@@ -6,24 +6,28 @@ defmodule EmAttachments.Backends.S3.CacheRegistry do
   Add to your supervision tree:
 
       children = [
-        {EmAttachments.Backends.S3.CacheRegistry,
-         backends: [
-           [bucket: "my-bucket", prefix: "uploads", region: "us-east-1",
-            access_key_id: "KEY", secret_access_key: "SECRET", cache_ttl: 1800]
-         ],
-         cleanup_interval: :timer.hours(24)}
+        EmAttachments.Backends.S3.CacheRegistry
       ]
+
+  When started with no options, the registry discovers S3 cache backends automatically
+  from `config :em_attachments, :config` (any backend with `policy: :cache`).
+
+  You can also pass an explicit list:
+
+      {EmAttachments.Backends.S3.CacheRegistry,
+       backends: [[bucket: "my-bucket", prefix: "uploads", ..., cache_ttl: 1800]],
+       cleanup_interval: :timer.hours(24)}
 
   Options:
     - `:backends` — list of backend opts keyword lists to scan at startup and periodically.
-      Each entry should include the same opts passed to the S3 backend with `policy: :cache`.
-      Defaults to `[]` (no scan, timer-only cleanup).
+      When omitted, auto-discovers from `EmAttachments.Config`.
     - `:cleanup_interval` — milliseconds between periodic scans. Defaults to 24 hours.
   """
 
   use GenServer
 
   alias EmAttachments.Backends.S3
+  alias EmAttachments.Config
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -57,7 +61,12 @@ defmodule EmAttachments.Backends.S3.CacheRegistry do
 
   @impl true
   def init(opts) do
-    backends = opts[:backends] || []
+    backends =
+      case Keyword.fetch(opts, :backends) do
+        {:ok, list} -> list
+        :error -> discover_backends()
+      end
+
     cleanup_interval = opts[:cleanup_interval] || :timer.hours(24)
 
     if backends != [] do
@@ -107,6 +116,25 @@ defmodule EmAttachments.Backends.S3.CacheRegistry do
   end
 
   # ---------------------------------------------------------------------------
+
+  defp discover_backends do
+    [&Config.cache/0, &Config.store/0]
+    |> Enum.flat_map(fn resolver ->
+      with {S3, opts} <- safe_call(resolver),
+           :cache <- opts[:policy] do
+        [opts]
+      else
+        _ -> []
+      end
+    end)
+    |> Enum.uniq_by(&{&1[:bucket], &1[:prefix]})
+  end
+
+  defp safe_call(f) do
+    f.()
+  rescue
+    _ -> nil
+  end
 
   defp run_cleanup_scan(backends) do
     for backend_opts <- backends do
