@@ -46,7 +46,7 @@ defmodule EmAttachments.Plugins.Derivatives do
 
   use EmAttachments.Plugin
 
-  alias EmAttachments.{BackendFile, Cmd, MemoryFile, SourceFile, TempFile, Util}
+  alias EmAttachments.{Backend, BackendFile, Cmd, MemoryFile, SourceFile, TempFile, Util}
 
   @impl true
   # Cache phase: generate and upload to cache backend.
@@ -127,10 +127,7 @@ defmodule EmAttachments.Plugins.Derivatives do
   def destroy(file, ctx) do
     {backend_mod, backend_opts} = ctx.backend
     own_data = get_in(file.metadata, [:plugins, ctx.plugin_key]) || %{}
-
-    collect_store_ids(own_data)
-    |> Enum.each(fn id -> backend_mod.delete(id, backend_opts) end)
-
+    Backend.delete_many(backend_mod, collect_store_ids(own_data), backend_opts)
     :ok
   end
 
@@ -195,36 +192,28 @@ defmodule EmAttachments.Plugins.Derivatives do
     end
   end
 
-  # Copies already-uploaded cache derivatives to the store backend in parallel.
+  # Copies already-uploaded cache derivatives to the store backend.
   # Each cached variant gets its own BackendFile so the backend can decide to
   # do a server-side copy (e.g. S3 CopyObject) rather than downloading locally.
   defp copy_variants_to_store(variants, cache_mod, cache_opts, store_mod, store_opts) do
     flat = collect_cache_ids(variants)
 
-    flat
-    |> Task.async_stream(
-      fn {key_path, cache_id} ->
-        bf = BackendFile.new(cache_mod, cache_opts, cache_id, "", nil)
-        new_id = Util.random_id(8)
-        result = store_mod.put(new_id, bf, store_opts)
-        BackendFile.cleanup(bf)
-        {key_path, new_id, result}
-      end,
-      ordered: true
-    )
-    |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {key_path, new_id, :ok}}, {:ok, acc} ->
-        {:cont, {:ok, [{key_path, %{id: new_id, storage: :store}} | acc]}}
+    items =
+      Enum.map(flat, fn {key_path, cache_id} ->
+        {key_path, Util.random_id(8), BackendFile.new(cache_mod, cache_opts, cache_id, "", nil)}
+      end)
 
-      {:ok, {_, _, {:error, _} = err}}, _ ->
-        {:halt, err}
+    files = Enum.map(items, fn {_, new_id, bf} -> {new_id, bf} end)
+    result = Backend.put_many(store_mod, files, store_opts)
+    Enum.each(items, fn {_, _, bf} -> BackendFile.cleanup(bf) end)
 
-      {:exit, reason}, _ ->
-        {:halt, {:error, {:task_exit, reason}}}
-    end)
-    |> case do
-      {:ok, results} -> {:ok, %{variants: reconstruct_tree(Enum.reverse(results))}}
-      err -> err
+    case result do
+      :ok ->
+        results = Enum.map(items, fn {key_path, new_id, _} -> {key_path, %{id: new_id, storage: :store}} end)
+        {:ok, %{variants: reconstruct_tree(results)}}
+
+      err ->
+        err
     end
   end
 
@@ -241,39 +230,28 @@ defmodule EmAttachments.Plugins.Derivatives do
     end)
   end
 
-  # Uploads a map of handler outputs in parallel.
+  # Uploads a map of handler outputs.
   # resolve_cmds expands {:cmd,...}/{:cmd_stdout,...} tuples using the source file.
   # build_pending converts binaries to TempFiles; nested maps are recursed.
-  # All leaf TempFiles/MemoryFiles are collected flat, uploaded concurrently, then
-  # the original tree shape is reconstructed from the results.
+  # All leaf TempFiles/MemoryFiles are collected flat, uploaded via Backend.put_many,
+  # then the original tree shape is reconstructed from the results.
   defp upload_derivatives(map, backend_mod, backend_opts, storage, source) when is_map(map) do
     resolved = resolve_cmds(map, source)
     pending = build_pending(resolved)
     flat = collect_items(pending)
 
-    flat
-    |> Task.async_stream(
-      fn {key_path, item} ->
-        id = Util.random_id(8)
-        result = backend_mod.put(id, item, backend_opts)
-        if result == :ok, do: cleanup_source(item)
-        {key_path, id, result}
-      end,
-      ordered: true
-    )
-    |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {key_path, id, :ok}}, {:ok, acc} ->
-        {:cont, {:ok, [{key_path, %{id: id, storage: storage}} | acc]}}
+    items = Enum.map(flat, fn {key_path, item} -> {key_path, Util.random_id(8), item} end)
+    files = Enum.map(items, fn {_, id, item} -> {id, item} end)
+    result = Backend.put_many(backend_mod, files, backend_opts)
+    Enum.each(items, fn {_, _, item} -> cleanup_source(item) end)
 
-      {:ok, {_, _, {:error, _} = err}}, _ ->
-        {:halt, err}
+    case result do
+      :ok ->
+        results = Enum.map(items, fn {key_path, id, _} -> {key_path, %{id: id, storage: storage}} end)
+        {:ok, reconstruct_tree(results)}
 
-      {:exit, reason}, _ ->
-        {:halt, {:error, {:task_exit, reason}}}
-    end)
-    |> case do
-      {:ok, results} -> {:ok, reconstruct_tree(Enum.reverse(results))}
-      err -> err
+      err ->
+        err
     end
   end
 

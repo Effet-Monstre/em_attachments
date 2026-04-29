@@ -10,12 +10,29 @@ defmodule EmAttachments.Backends.S3 do
     - `:secret_access_key` — defaults to `AWS_SECRET_ACCESS_KEY` env var
     - `:acl` — `:private` (default) | `:public_read` | `:authenticated_read`
     - `:url_expires_in` — presigned URL TTL in seconds, defaults to 3600
+    - `:policy` — set to `:cache` to enable the cache policy (see below)
+    - `:cache_ttl` — seconds before a cache-policy file is auto-deleted, defaults to 1800
+
+  ## Cache policy (`policy: :cache`)
+
+  When both the cache and store backends point to the same S3 bucket and prefix,
+  setting `policy: :cache` on the **cache** opts uploads the file immediately to its
+  final store location and writes a small empty sentinel object at
+  `{prefix}/cache/{id}`. A `EmAttachments.Backends.S3.CacheRegistry` timer fires
+  after `cache_ttl` seconds and deletes the file if it was never promoted.
+
+  On promotion, `put/3` detects the same-key copy and short-circuits: no data is
+  moved, the timer is cancelled, and the pipeline's follow-up `delete/3` removes only
+  the sentinel. The actual file remains intact at its final location.
+
+  Requires `EmAttachments.Backends.S3.CacheRegistry` to be running in the
+  application supervision tree.
   """
 
   @behaviour EmAttachments.Backend
 
   alias EmAttachments.{BackendFile, SourceFile}
-  alias EmAttachments.Backends.S3.Signer
+  alias EmAttachments.Backends.S3.{CacheRegistry, Signer}
 
   @impl true
   def put(id, %BackendFile{} = source, opts) do
@@ -29,7 +46,10 @@ defmodule EmAttachments.Backends.S3 do
   end
 
   def put(id, source, opts) do
-    do_put(id, source, opts)
+    with :ok <- do_put(id, source, opts),
+         :ok <- maybe_write_sentinel(id, opts) do
+      :ok
+    end
   end
 
   @impl true
@@ -46,13 +66,12 @@ defmodule EmAttachments.Backends.S3 do
 
   @impl true
   def delete(id, opts) do
-    url = object_url(id, opts)
-    headers = Signer.sign_request(:delete, url, %{}, :unsigned, opts)
-
-    case Req.delete(url, headers: headers) do
-      {:ok, %{status: s}} when s in [200, 204] -> :ok
-      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
-      {:error, reason} -> {:error, reason}
+    if opts[:policy] == :cache do
+      bucket = Keyword.fetch!(opts, :bucket)
+      CacheRegistry.cancel(bucket, id)
+      delete_sentinel(id, opts)
+    else
+      do_delete(object_url(id, opts), opts)
     end
   end
 
@@ -82,10 +101,73 @@ defmodule EmAttachments.Backends.S3 do
     {:ok, %{url: url, fields: fields}}
   end
 
+  @impl true
+  def bulk_delete(ids, opts) do
+    prefix = opts[:prefix] || "uploads"
+    bucket = Keyword.fetch!(opts, :bucket)
+    keys = Enum.map(ids, fn id -> "#{prefix}/#{id}" end)
+
+    keys
+    |> Enum.chunk_every(1000)
+    |> Enum.reduce_while(:ok, fn chunk, _ ->
+      case do_bulk_delete(chunk, bucket, opts) do
+        :ok -> {:cont, :ok}
+        err -> {:halt, err}
+      end
+    end)
+  end
+
+  @impl true
+  def bulk_put(files, opts) do
+    files
+    |> Task.async_stream(
+      fn {id, source} -> put(id, source, opts) end,
+      max_concurrency: System.schedulers_online() * 2,
+      ordered: false
+    )
+    |> Enum.reduce_while(:ok, fn
+      {:ok, :ok}, _ -> {:cont, :ok}
+      {:ok, {:error, _} = err}, _ -> {:halt, err}
+      {:exit, reason}, _ -> {:halt, {:error, {:task_exit, reason}}}
+    end)
+  end
+
+  @doc false
+  def expire_cache_file(id, opts) do
+    do_delete(object_url(id, opts), opts)
+    do_delete(sentinel_url(id, opts), opts)
+    :ok
+  end
+
+  @doc false
+  def list_cache_objects(opts, prefix) do
+    bucket = Keyword.fetch!(opts, :bucket)
+    bucket_url = build_bucket_url(bucket, opts)
+    encoded_prefix = URI.encode(prefix, &URI.char_unreserved?/1)
+    url = "#{bucket_url}/?list-type=2&prefix=#{encoded_prefix}"
+    headers = Signer.sign_request(:get, url, %{}, :unsigned, opts)
+
+    case Req.get(url, headers: headers) do
+      {:ok, %{status: 200, body: body}} -> {:ok, parse_list_objects_xml(body)}
+      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private
+  # ---------------------------------------------------------------------------
+
   defp object_url(id, opts) do
     bucket = Keyword.fetch!(opts, :bucket)
     prefix = opts[:prefix] || "uploads"
     "#{build_bucket_url(bucket, opts)}/#{prefix}/#{id}"
+  end
+
+  defp sentinel_url(id, opts) do
+    bucket = Keyword.fetch!(opts, :bucket)
+    prefix = opts[:prefix] || "uploads"
+    "#{build_bucket_url(bucket, opts)}/#{prefix}/cache/#{id}"
   end
 
   defp public_url(id, opts) do
@@ -120,14 +202,69 @@ defmodule EmAttachments.Backends.S3 do
     end
   end
 
+  defp maybe_write_sentinel(id, opts) do
+    if opts[:policy] == :cache do
+      case put_sentinel(id, opts) do
+        :ok ->
+          ttl = opts[:cache_ttl] || 1800
+          bucket = Keyword.fetch!(opts, :bucket)
+          CacheRegistry.register(bucket, id, opts, ttl)
+          :ok
+
+        err ->
+          err
+      end
+    else
+      :ok
+    end
+  end
+
+  defp put_sentinel(id, opts) do
+    url = sentinel_url(id, opts)
+    headers = Signer.sign_request(:put, url, %{"x-amz-acl" => "private"}, "", opts)
+
+    case Req.put(url, headers: headers, body: "") do
+      {:ok, %{status: s}} when s in 200..299 -> :ok
+      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp delete_sentinel(id, opts) do
+    do_delete(sentinel_url(id, opts), opts)
+  end
+
+  defp do_delete(url, opts) do
+    headers = Signer.sign_request(:delete, url, %{}, :unsigned, opts)
+
+    case Req.delete(url, headers: headers) do
+      {:ok, %{status: s}} when s in [200, 204] -> :ok
+      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   # S3 server-side copy — no local download needed when source and dest share a bucket.
   defp copy_object(source_id, source_opts, dest_id, dest_opts) do
+    if source_opts[:policy] == :cache and
+         source_id == dest_id and
+         (source_opts[:prefix] || "uploads") == (dest_opts[:prefix] || "uploads") do
+      # Promotion: file already in place at the store location.
+      # Cancel the timer early; the pipeline's cache_mod.delete/3 will remove the sentinel.
+      bucket = Keyword.fetch!(source_opts, :bucket)
+      CacheRegistry.cancel(bucket, source_id)
+      :ok
+    else
+      do_copy_object(source_id, source_opts, dest_id, dest_opts)
+    end
+  end
+
+  defp do_copy_object(source_id, source_opts, dest_id, dest_opts) do
     dest_url = object_url(dest_id, dest_opts)
     source_bucket = Keyword.fetch!(source_opts, :bucket)
     source_prefix = source_opts[:prefix] || "uploads"
     copy_source = "/#{source_bucket}/#{source_prefix}/#{source_id}"
     copy_headers = acl_header(dest_opts[:acl]) |> Map.put("x-amz-copy-source", copy_source)
-    # Sign with the empty-body hash (correct for CopyObject; body is zero bytes)
     headers = Signer.sign_request(:put, dest_url, copy_headers, "", dest_opts)
 
     case Req.put(dest_url, headers: headers, body: "") do
@@ -135,6 +272,42 @@ defmodule EmAttachments.Backends.S3 do
       {:ok, %{status: s, body: b}} -> {:error, {s, b}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp do_bulk_delete(keys, bucket, opts) do
+    body = build_delete_objects_xml(keys)
+    bucket_url = build_bucket_url(bucket, opts)
+    md5 = :crypto.hash(:md5, body) |> Base.encode64()
+    url = "#{bucket_url}/?delete"
+
+    extra_headers = %{
+      "content-md5" => md5,
+      "content-type" => "application/xml"
+    }
+
+    headers = Signer.sign_request(:post, url, extra_headers, body, opts)
+
+    case Req.post(url, headers: headers, body: body) do
+      {:ok, %{status: s}} when s in 200..299 -> :ok
+      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp build_delete_objects_xml(keys) do
+    objects = Enum.map_join(keys, "", fn key -> "<Object><Key>#{key}</Key></Object>" end)
+    ~s(<?xml version="1.0" encoding="UTF-8"?><Delete>#{objects}</Delete>)
+  end
+
+  defp parse_list_objects_xml(body) do
+    Regex.scan(
+      ~r/<Contents>.*?<Key>(.*?)<\/Key>.*?<LastModified>(.*?)<\/LastModified>.*?<\/Contents>/s,
+      body
+    )
+    |> Enum.map(fn [_, key, last_modified] ->
+      {:ok, dt, _} = DateTime.from_iso8601(last_modified)
+      {key, dt}
+    end)
   end
 
   defp same_bucket?(source_opts, dest_opts) do
