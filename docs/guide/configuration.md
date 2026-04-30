@@ -86,20 +86,12 @@ The third element of the tuple is an optional fallback used when the variable is
 | `secret_access_key` | `AWS_SECRET_ACCESS_KEY` env | AWS secret key |
 | `acl` | `:private` | Canned ACL: `:private`, `:public_read`, `:authenticated_read` |
 | `url_expires_in` | `3600` | Presigned URL TTL in seconds |
+| `policy` | — | Set to `:cache` to enable same-bucket cache optimisation |
+| `cache_ttl` | `1800` | Seconds before a cache-policy file is auto-deleted |
 
 No ExAws dependency — uses AWS Signature v4 directly via `req`.
 
-When promoting from cache to the same S3 bucket, the backend performs a server-side `CopyObject` — the file is never downloaded locally.
-
-### Presigned uploads
-
-For direct browser-to-S3 uploads, generate presigned POST credentials:
-
-```elixir
-{:ok, %{url: url, fields: fields}} = AvatarUploader.presign_upload()
-# Render url + fields as a multipart form; the browser uploads directly to S3.
-# After upload, call AvatarUploader.upload/1 with the returned object key.
-```
+See the [S3 guide](./s3) for credentials setup, ACL options, presigned uploads, the cache policy, and bulk operations.
 
 ---
 
