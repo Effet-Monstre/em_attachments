@@ -24,7 +24,7 @@ export default defineConfig({
           { text: "Configuration", link: "/guide/configuration" },
           { text: "Plugins", link: "/guide/plugins" },
           { text: "Derivatives", link: "/guide/derivatives" },
-          { text: "Derivatives", link: "/guide/next" },
+          { text: "Next", link: "/guide/next" },
         ],
       },
     ],
