@@ -28,7 +28,7 @@ defmodule EmAttachments.Plugin do
       end
   """
 
-  @optional_callbacks [cast: 2, init: 2, upload: 3, validate: 3, destroy: 2, url: 3, after_confirm: 2]
+  @optional_callbacks [cast: 2, init: 2, upload: 3, validate: 3, destroy: 2, url: 3, after_confirm: 2, asset_ids: 2]
 
   @doc """
   Called by `cast_attachments` before the upload pipeline to convert a raw changeset
@@ -107,6 +107,22 @@ defmodule EmAttachments.Plugin do
               file :: struct(),
               ctx :: %{plugin_key: atom(), plugin_opts: keyword(), backend: {module(), keyword()}}
             ) :: :ok | {:error, term()}
+
+  @doc """
+  Returns the list of backend asset IDs stored by this plugin for the given file.
+
+  Called during upload to register each plugin-stored file in the tracking table, and
+  during `mark_permanent` to mark every stored asset as permanent.
+
+  `ctx.plugin_key` identifies which plugin's metadata to inspect.
+
+  Plugins that store no additional backend files (e.g. MIME, Dimensions) need not
+  implement this callback — the default is to return `[]`.
+  """
+  @callback asset_ids(
+              file :: struct(),
+              ctx :: %{plugin_key: atom(), plugin_opts: keyword()}
+            ) :: [String.t()]
 
   defmacro __using__(opts) do
     deps = opts[:depends_on] || []

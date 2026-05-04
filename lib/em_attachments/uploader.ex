@@ -218,6 +218,10 @@ defmodule EmAttachments.Uploader do
         EmAttachments.Uploader.Pipeline.delete(__MODULE__, file)
       end
 
+      def mark_permanent(repo, file) do
+        EmAttachments.Uploader.Pipeline.mark_permanent(repo, __MODULE__, file)
+      end
+
       def reprocess(file) do
         EmAttachments.Uploader.Pipeline.reprocess(__MODULE__, file)
       end

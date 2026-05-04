@@ -56,6 +56,12 @@ defmodule EmAttachments.Plugins.Derivatives do
   end
 
   @impl true
+  def asset_ids(file, ctx) do
+    own_data = get_in(file.metadata, [:plugins, ctx.plugin_key]) || %{}
+    collect_ids(own_data)
+  end
+
+  @impl true
   def url(_file, nil, _ctx), do: :skip
 
   def url(file, path, ctx) when is_list(path) do

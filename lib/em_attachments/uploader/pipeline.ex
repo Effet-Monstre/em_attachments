@@ -141,6 +141,29 @@ defmodule EmAttachments.Uploader.Pipeline do
     end
   end
 
+  @doc """
+  Marks the main file and every plugin-stored asset (e.g. derivatives) as permanent.
+
+  Calls `Upload.mark_permanent/2` for the root file ID, then iterates plugins that
+  export `asset_ids/2` and marks each returned ID as well.
+  """
+  def mark_permanent(repo, uploader, file) do
+    EmAttachments.Upload.mark_permanent(repo, file.id)
+
+    ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
+
+    for {key, mod, plugin_opts} <- ordered,
+        function_exported?(mod, :asset_ids, 2) do
+      ids = mod.asset_ids(file, %{plugin_key: key, plugin_opts: plugin_opts})
+
+      for id <- ids do
+        EmAttachments.Upload.mark_permanent(repo, id)
+      end
+    end
+
+    :ok
+  end
+
   def load_file(uploader, data) when is_map(data) do
     data = Util.atomize_keys(data)
 
@@ -179,6 +202,28 @@ defmodule EmAttachments.Uploader.Pipeline do
             status: "pending",
             expires_at: expires_at
           })
+
+          ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
+
+          for {key, mod, plugin_opts} <- ordered,
+              function_exported?(mod, :asset_ids, 2) do
+            plugin_ids = mod.asset_ids(file, %{plugin_key: key, plugin_opts: plugin_opts})
+
+            for plugin_id <- plugin_ids do
+              EmAttachments.Upload.insert_pending(repo, %{
+                asset_id: plugin_id,
+                uploader: to_string(uploader),
+                serialized:
+                  Jason.encode!(%{
+                    id: plugin_id,
+                    storage: "store",
+                    uploader: to_string(uploader)
+                  }),
+                status: "pending",
+                expires_at: expires_at
+              })
+            end
+          end
       end
     end
   end

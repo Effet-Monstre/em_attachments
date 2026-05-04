@@ -152,7 +152,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
           changeset
           |> force_change(key, file)
           |> prepare_changes(fn cs ->
-            EmAttachments.Upload.mark_permanent(cs.repo, file.id)
+            file.__struct__.mark_permanent(cs.repo, file)
             cs
           end)
 
@@ -204,7 +204,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         changeset
         |> put_change(key, file)
         |> prepare_changes(fn cs ->
-          EmAttachments.Upload.mark_permanent(cs.repo, file.id)
+          file.__struct__.mark_permanent(cs.repo, file)
           if prev_file, do: delete_file(prev_file)
           cs
         end)

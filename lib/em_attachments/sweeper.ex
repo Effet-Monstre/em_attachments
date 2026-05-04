@@ -110,7 +110,11 @@ defmodule EmAttachments.Sweeper do
             end
           end
 
-          run_after_confirm(uploader, file, {backend_mod, backend_opts})
+          # Derivative rows carry a minimal serialized struct (no metadata).
+          # `after_confirm` is only meaningful for the full file — skip for derivatives.
+          if not is_nil(file.metadata) do
+            run_after_confirm(uploader, file, {backend_mod, backend_opts})
+          end
 
         {:error, reason} ->
           Logger.error(
