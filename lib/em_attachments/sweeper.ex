@@ -56,10 +56,11 @@ defmodule EmAttachments.Sweeper do
   end
 
   # ---------------------------------------------------------------------------
-  # Private
+  # Public for testing
   # ---------------------------------------------------------------------------
 
-  defp sweep(repo) do
+  @doc false
+  def sweep(repo) do
     cleanup_expired_pending(repo)
     finalize_permanent(repo)
   end
