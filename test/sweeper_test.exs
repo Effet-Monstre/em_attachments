@@ -3,7 +3,7 @@ defmodule EmAttachments.SweeperTest do
 
   @moduletag :db
 
-  alias EmAttachments.Test.{Repo, NoPluginUploader, Fixtures}
+  alias EmAttachments.Test.{Repo, NoPluginUploader, DerivativeUploader, Fixtures}
   alias EmAttachments.{Upload, Sweeper}
 
   setup do
@@ -122,6 +122,82 @@ defmodule EmAttachments.SweeperTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Expired pending uploads with derivative variants
+  # ---------------------------------------------------------------------------
+
+  describe "expired pending uploads with derivatives" do
+    test "sweep/1 deletes the derivative file from the store backend" do
+      {:ok, file} =
+        DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "main.png"})
+
+      deriv_id = file.metadata.plugins.derivatives.variants.copy.id
+
+      # Main row (full serialized JSON): sweep processes it via uploader.delete/1
+      # which calls Derivatives.destroy → deletes derivative files.
+      insert_pending_row!(file, expires_at: past())
+
+      assert backend_file_exists?(file.id), "main file must exist before sweep"
+      assert backend_file_exists?(deriv_id), "derivative file must exist before sweep"
+
+      Sweeper.sweep(Repo)
+
+      refute backend_file_exists?(deriv_id),
+             "derivative file must be deleted when expired main row is swept"
+    end
+
+    test "sweep/1 deletes the derivative file via its own tracking row" do
+      {:ok, file} =
+        DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "main.png"})
+
+      deriv_id = file.metadata.plugins.derivatives.variants.copy.id
+
+      # Only the derivative row is expired; the main row is not inserted (simulate
+      # the case where only the leaf row remains, e.g. after partial cleanup).
+      insert_derivative_pending_row!(file, deriv_id, expires_at: past())
+
+      assert backend_file_exists?(deriv_id), "derivative file must exist before sweep"
+
+      Sweeper.sweep(Repo)
+
+      refute backend_file_exists?(deriv_id),
+             "derivative file must be deleted when its own tracking row expires"
+    end
+
+    test "sweep/1 removes both main and derivative tracking rows from the database" do
+      {:ok, file} =
+        DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "main.png"})
+
+      deriv_id = file.metadata.plugins.derivatives.variants.copy.id
+
+      insert_pending_row!(file, expires_at: past())
+      insert_derivative_pending_row!(file, deriv_id, expires_at: past())
+
+      Sweeper.sweep(Repo)
+
+      assert Upload.expired_pending(Repo, 100) == [],
+             "all expired tracking rows (main + derivative) must be removed"
+    end
+
+    test "sweep/1 does not delete derivative files that belong to non-expired rows" do
+      {:ok, file} =
+        DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "main.png"})
+
+      deriv_id = file.metadata.plugins.derivatives.variants.copy.id
+
+      insert_pending_row!(file, expires_at: future())
+      insert_derivative_pending_row!(file, deriv_id, expires_at: future())
+
+      Sweeper.sweep(Repo)
+
+      assert backend_file_exists?(file.id),
+             "main file must remain when rows have not expired"
+
+      assert backend_file_exists?(deriv_id),
+             "derivative file must remain when rows have not expired"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
 
@@ -159,6 +235,25 @@ defmodule EmAttachments.SweeperTest do
       {:ok, _} -> true
       {:error, _} -> false
     end
+  end
+
+  defp insert_derivative_pending_row!(main_file, derivative_id, opts) do
+    expires_at = Keyword.get(opts, :expires_at, future())
+
+    {:ok, row} =
+      Upload.insert_pending(Repo, %{
+        asset_id: derivative_id,
+        uploader: to_string(main_file.__struct__),
+        serialized:
+          Jason.encode!(%{
+            id: derivative_id,
+            storage: "store",
+            uploader: to_string(main_file.__struct__)
+          }),
+        expires_at: expires_at
+      })
+
+    row
   end
 
   defp past, do: DateTime.add(DateTime.utc_now(), -3600, :second)
