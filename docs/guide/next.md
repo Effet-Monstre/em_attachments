@@ -301,6 +301,21 @@ end
 
 This gets merged into `call_opts` and checked before `Config.expiry/0`.
 
+### Consider: table backup to backend storage
+
+Any kind of failure — data corruption, accidental table drop, botched migration — can wipe the `em_attachments_uploads` table and leave orphaned assets in the backend with nothing to clean them up.
+
+An optional `:backup_key` config key could point to a file written to the configured store backend (S3, local, etc.). The Sweeper would serialize the full table as NDJSON and write it to that key after each tick:
+
+```elixir
+config :em_attachments, :config,
+  backup_key: "backups/em_attachments_uploads.ndjson"
+```
+
+Restoration would be a mix task (`mix em_attachments.restore_uploads`) that reads the backup from the backend, diffs it against the current table state, and re-inserts missing rows. The normal sweeper flow then handles cleanup from there.
+
+`Config.backup_key/0` returns `nil` by default (feature is opt-in).
+
 ---
 
 ## 9. Derivatives Plugin Updates (`plugins/derivatives.ex`)
