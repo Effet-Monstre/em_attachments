@@ -14,8 +14,8 @@ defmodule EmAttachments.Uploader do
         validates mime: [type: ~w(image/png image/jpeg), extension: ~w(png jpg jpeg)]
         validates dimensions: [max_width: 4000, max_height: 4000]
 
-        # Override store/cache backend for this uploader only:
-        # use EmAttachments.Uploader, store: {Backends.S3, acl: :public_read}, ...
+        # Override store backend for this uploader only:
+        # use EmAttachments.Uploader, store: {Backends.S3, acl: :public_read}
 
         # Custom validation (receives the source file and all plugin results):
         def validate(source, plugin_results) do
@@ -36,12 +36,12 @@ defmodule EmAttachments.Uploader do
 
   ## Deferred promotion
 
-  To skip promotion during Ecto save and promote later (e.g. in a background job):
+  To skip marking a file permanent during Ecto save and do it later (e.g. in a background job):
 
-      # In your changeset — saves the file in :cache state
+      # In your changeset — file is uploaded to store but stays pending
       cast_attachments(changeset, [:avatar], promote: false)
 
-      # Later, in a background job — promotes the cached file to :store
+      # Later, in a background job — marks the pending file as permanent
       cast_attachments(changeset, [:avatar], promote: true)
 
   ## Reprocessing
@@ -50,7 +50,7 @@ defmodule EmAttachments.Uploader do
 
       {:ok, new_file} = MyUploader.reprocess(stored_file)
 
-  This downloads the original from the store, runs the full upload pipeline, promotes the
+  This downloads the original from the store, runs the full upload pipeline, uploads the
   result back to store, and deletes the original.
 
   ## Ecto integration
@@ -75,10 +75,9 @@ defmodule EmAttachments.Uploader do
       defstruct [:id, :storage, :metadata, :uploader]
 
       defimpl String.Chars do
-        def to_string(%{storage: :cache} = file),
+        def to_string(%{id: id} = file) when is_binary(id),
           do: String.to_existing_atom(file.uploader).serialize(file)
 
-        def to_string(%{id: id}) when is_binary(id), do: id
         def to_string(_), do: ""
       end
 
@@ -162,8 +161,7 @@ defmodule EmAttachments.Uploader do
 
           def cast(json) when is_binary(json) do
             case __MODULE__.deserialize(json) do
-              {:ok, %{storage: :cache} = file} -> {:ok, file}
-              {:ok, _} -> :error
+              {:ok, file} -> {:ok, file}
               {:error, _} -> :error
             end
           end
@@ -214,10 +212,6 @@ defmodule EmAttachments.Uploader do
 
       def upload(input, call_opts \\ []) do
         EmAttachments.Uploader.Pipeline.upload(__MODULE__, input, call_opts)
-      end
-
-      def promote(cached_file, call_opts \\ []) do
-        EmAttachments.Uploader.Pipeline.promote(__MODULE__, cached_file, call_opts)
       end
 
       def delete(file) do

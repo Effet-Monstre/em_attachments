@@ -31,7 +31,7 @@ if Code.ensure_loaded?(Phoenix.Router) do
 
       assert conn.status == 200
       assert {:ok, body} = Jason.decode(conn.resp_body)
-      assert body["storage"] == "cache"
+      assert body["storage"] == "store"
       assert is_binary(body["id"])
       assert body["uploader"] == to_string(EmAttachments.Test.BasicUploader)
     end

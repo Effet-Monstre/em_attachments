@@ -15,7 +15,7 @@ defmodule EmAttachments.EctoRepoTest do
 
   # ── Happy path ─────────────────────────────────────────────────────────────
 
-  test "Plug.Upload caches file, Repo.insert promotes to store and persists" do
+  test "Plug.Upload stores directly to store, Repo.insert marks permanent and persists" do
     upload = %Plug.Upload{
       path: Fixtures.png_path(),
       filename: "avatar.png",
@@ -27,7 +27,7 @@ defmodule EmAttachments.EctoRepoTest do
       |> cast_attachments([:avatar])
 
     assert cs.valid?
-    assert get_change(cs, :avatar).storage == :cache
+    assert get_change(cs, :avatar).storage == :store
 
     {:ok, user} = Repo.insert(cs)
 
@@ -43,7 +43,7 @@ defmodule EmAttachments.EctoRepoTest do
 
   # ── Validation error → serialize → resubmit via JSON → store ──────────────
 
-  test "invalid file produces error changeset; valid file pre-cached and resubmitted via JSON" do
+  test "invalid file produces error changeset; valid file stored and resubmitted via JSON" do
     # Step 1: bad upload fails MIME validation
     bad = %Plug.Upload{
       path: Fixtures.txt_path(),
@@ -59,21 +59,21 @@ defmodule EmAttachments.EctoRepoTest do
     assert bad_cs.errors[:avatar] != nil
     assert {:error, _} = Repo.insert(bad_cs)
 
-    # Step 2: valid file is cached, serialized for the hidden form field
-    {:ok, cached} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "photo.png"})
-    json = BasicUploader.serialize(cached)
+    # Step 2: valid file is uploaded and serialized for the hidden form field
+    {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "photo.png"})
+    json = BasicUploader.serialize(file)
 
-    # Step 3: form resubmitted with corrected data + the cached JSON
+    # Step 3: form resubmitted with corrected data + the pending JSON
     good_cs =
       DbUser.changeset(%{"name" => "Bob", "avatar" => json})
       |> cast_attachments([:avatar])
 
     assert good_cs.valid?
-    assert get_change(good_cs, :avatar).storage == :cache
+    assert get_change(good_cs, :avatar).storage == :store
 
     {:ok, user} = Repo.insert(good_cs)
     assert user.avatar.storage == :store
-    assert user.avatar.id == cached.id
+    assert user.avatar.id == file.id
     assert user.avatar.metadata.filename == "photo.png"
   end
 
@@ -150,14 +150,14 @@ defmodule EmAttachments.EctoRepoTest do
 
   # ── Delayed promote ────────────────────────────────────────────────────────
 
-  test "promote: false persists cache file to DB, promote: true later promotes and updates DB" do
+  test "promote: false keeps file in store but skips mark_permanent; promote: true marks permanent later" do
     upload = %Plug.Upload{
       path: Fixtures.png_path(),
       filename: "deferred.png",
       content_type: "image/png"
     }
 
-    # Step 1: insert with promote: false — file stays in cache
+    # Step 1: insert with promote: false — pending row stays in tracking table
     cs =
       DbUser.changeset(%{"name" => "Carol", "avatar" => upload})
       |> cast_attachments([:avatar], promote: false)
@@ -166,15 +166,15 @@ defmodule EmAttachments.EctoRepoTest do
     assert cs.prepare == []
 
     {:ok, user} = Repo.insert(cs)
-    assert user.avatar.storage == :cache
+    assert user.avatar.storage == :store
     assert user.avatar.metadata.filename == "deferred.png"
 
-    # Step 2: reload from DB — cache struct round-trips correctly
+    # Step 2: reload from DB — file round-trips correctly
     loaded = Repo.get!(DbUser, user.id)
-    assert loaded.avatar.storage == :cache
+    assert loaded.avatar.storage == :store
     assert loaded.avatar.id == user.avatar.id
 
-    # Step 3: promote later — cast_attachments with promote: true triggers promotion on update
+    # Step 3: mark permanent later — cast_attachments with promote: true triggers mark_permanent
     promote_cs =
       DbUser.changeset(loaded, %{})
       |> cast_attachments([:avatar], promote: true)
@@ -259,24 +259,21 @@ defmodule EmAttachments.EctoRepoTest do
       |> cast_attachments([:avatar])
 
     assert cs.valid?
-    assert get_change(cs, :avatar).storage == :cache
+    assert get_change(cs, :avatar).storage == :store
 
     {:ok, user} = Repo.insert(cs)
     assert user.avatar.storage == :store
     assert user.avatar.metadata.plugins.mime.type == "image/png"
 
-    # Derivative metadata is persisted.
     thumb = user.avatar.metadata.plugins.derivatives.variants.thumb
     assert thumb.storage == :store
 
-    # Derivative file content on disk is a valid PNG.
     if match?({EmAttachments.Backends.Local, _}, EmAttachments.Config.store()) do
       {_mod, store_opts} = EmAttachments.Config.store()
       content = File.read!(Path.join(store_opts[:fs_path], thumb.id))
       assert <<0x89, ?P, ?N, ?G, _::binary>> = content
     end
 
-    # Round-trip through DB: derivative IDs survive serialisation.
     loaded = Repo.get!(CmdStdoutDbUser, user.id)
     assert loaded.avatar.storage == :store
     loaded_thumb = loaded.avatar.metadata.plugins.derivatives.variants.thumb
@@ -287,12 +284,11 @@ defmodule EmAttachments.EctoRepoTest do
   # ── Helpers ────────────────────────────────────────────────────────────────
 
   defp insert_user_with_avatar! do
-    {:ok, cached} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "avatar.png"})
-    {:ok, stored} = BasicUploader.promote(cached)
+    {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "avatar.png"})
 
     cs =
       DbUser.changeset(%DbUser{}, %{"name" => "Seed User"})
-      |> put_change(:avatar, stored)
+      |> put_change(:avatar, file)
 
     {:ok, user} = Repo.insert(cs)
     user

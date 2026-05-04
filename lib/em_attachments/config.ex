@@ -1,6 +1,9 @@
 defmodule EmAttachments.Config do
   @moduledoc false
 
+  @default_expiry :timer.hours(24)
+  @default_sweeper_interval :timer.minutes(30)
+
   def all do
     Application.get_env(:em_attachments, :config, [])
   end
@@ -10,9 +13,36 @@ defmodule EmAttachments.Config do
     resolve(:store, uploader_opts[:store])
   end
 
-  @doc "Returns {backend_mod, opts} for the cache, merging global config with uploader overrides."
-  def cache(uploader_opts \\ []) do
-    resolve(:cache, uploader_opts[:cache])
+  @doc "Returns the configured Ecto repo module, or nil if not set."
+  def repo do
+    all()[:repo]
+  end
+
+  @doc "Returns the configured Ecto repo module, raising if not set."
+  def repo! do
+    case all()[:repo] do
+      nil ->
+        raise "EmAttachments: :repo is not configured under config :em_attachments, :config. " <>
+                "Add `repo: MyApp.Repo` to your config and run `mix em_attachments.gen.migration`."
+
+      r ->
+        r
+    end
+  end
+
+  @doc "Returns the pending upload expiry in milliseconds (default: 24h)."
+  def expiry do
+    all()[:expiry] || @default_expiry
+  end
+
+  @doc "Returns the opts forwarded to backend.finalize/2 (default: [])."
+  def finalize_opts do
+    all()[:finalize_opts] || []
+  end
+
+  @doc "Returns the sweeper tick interval in milliseconds (default: 30m)."
+  def sweeper_interval do
+    all()[:sweeper_interval] || @default_sweeper_interval
   end
 
   @doc """
@@ -75,18 +105,12 @@ defmodule EmAttachments.Config do
     Enum.map(opts, fn {k, v} -> {k, resolve_value(v)} end)
   end
 
-  # nil or :default → use global config as-is
   defp resolve(type, nil), do: resolve(type, :default)
 
   defp resolve(type, :default) do
     case all()[type] do
       nil ->
         raise "EmAttachments: :#{type} backend is not configured under config :em_attachments, :config"
-
-      # Keyword list for :cache — inherit the store's adapter + opts, merge cache opts on top.
-      opts when is_list(opts) and type == :cache ->
-        {store_mod, store_opts} = resolve(:store, :default)
-        {store_mod, Keyword.merge(store_opts, resolve_opts(opts))}
 
       {mod, opts} ->
         {mod, resolve_opts(opts)}
@@ -96,13 +120,6 @@ defmodule EmAttachments.Config do
     end
   end
 
-  # Keyword list as uploader-level cache override — merge over the already-resolved global cache.
-  defp resolve(:cache, override_opts) when is_list(override_opts) do
-    {base_mod, base_opts} = resolve(:cache, :default)
-    {base_mod, Keyword.merge(base_opts, resolve_opts(override_opts))}
-  end
-
-  # {mod, opts} → merge with global opts, override module if given
   defp resolve(type, {override_mod, override_opts}) do
     {global_mod, global_opts} =
       case all()[type] do

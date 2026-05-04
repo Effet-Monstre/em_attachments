@@ -25,8 +25,11 @@ defmodule EmAttachments.Backends.Local do
 
   @impl true
   def delete(id, opts) do
-    File.rm(dest_path(id, opts))
-    :ok
+    case File.rm(dest_path(id, opts)) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @impl true

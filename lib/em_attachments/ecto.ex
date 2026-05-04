@@ -13,29 +13,29 @@ if Code.ensure_loaded?(Ecto.Changeset) do
 
     ## Param values accepted for each attachment field
 
-      - `%Plug.Upload{}` — new file upload. After casting the change is a signed
-        JSON string so `form[:logo].value` is directly usable as an HTML input
-        value. On save the file is promoted from cache to store.
+      - `%Plug.Upload{}` — new file upload. The file is uploaded directly to the store
+        backend as a pending asset. A `prepare_changes` callback marks it permanent
+        atomically with the Ecto transaction. The serialized struct is available as
+        `form[:logo].value` for use as an HTML hidden input on re-render.
       - `nil` — explicit deletion. Sets the field to `nil` and schedules removal
         of the previously stored file inside the Ecto transaction.
       - A JSON string produced by a prior serialize call — used to re-submit a
-        cached file when form validation fails. If the encoded file ID matches the
-        current field value the cast is a no-op. Cache files are promoted on save.
+        pending file when form validation fails. The file is marked permanent on save.
       - A bare file ID string — if it matches the current field's ID the cast is a
         no-op; otherwise an error is added.
       - Key absent from params — always a no-op (unless `promote: true`, see below).
 
     ## Options
 
-      - `promote: false` — skip promotion during save; the file is persisted in
-        `:cache` state. Promote later by calling `cast_attachments/3` with
-        `promote: true` (e.g. from a background job).
-      - `promote: true` — if the existing field already holds a `:cache` file and
-        no new upload param is present, register a `prepare_changes` callback to
-        promote it. Use this to drive deferred promotion.
-      - `reprocess: true` — if the existing field holds a `:store` file and no new
-        upload param is present, re-run the full upload pipeline on the existing file
-        and replace the field with the result.
+      - `promote: false` — skip marking the file permanent during save; the pending
+        row stays in the tracking table for the Sweeper to pick up. Mark it permanent
+        later by calling `cast_attachments/3` with `promote: true`.
+      - `promote: true` — if the existing field holds a file and no new upload param
+        is present, register a `prepare_changes` callback to mark it permanent.
+        Use this to drive deferred confirmation.
+      - `reprocess: true` — if the existing field holds a file and no new upload param
+        is present, re-run the full upload pipeline on the existing file and replace
+        the field with the result.
       - Any plugin key (atom) with a keyword list — merged into that plugin's
         compile-time options for this call only.
     """
@@ -45,17 +45,15 @@ if Code.ensure_loaded?(Ecto.Changeset) do
     @doc """
     Casts attachment fields in a changeset.
 
-    Accepts `%Plug.Upload{}`, a JSON string (signed cache payload or bare file
-    ID), a map, or `nil` (explicit delete). When a key is absent from params the
-    field is left untouched.
+    Accepts `%Plug.Upload{}`, a JSON string (pending file payload or bare file ID),
+    a map, or `nil` (explicit delete). When a key is absent from params the field
+    is left untouched.
 
-    After a successful upload the changeset change is stored as a signed JSON
-    string so that `form[:field].value` can be used directly as an HTML hidden
-    input value without any extra serialization. The string is replaced by the
-    final stored-file struct inside the `prepare_changes` callback that runs
-    within the Ecto transaction.
+    After a successful upload the changeset change is stored as the file struct.
+    `to_string(file)` serializes it to JSON so that `form[:field].value` can be used
+    directly as an HTML hidden input value without any extra work.
 
-    Pass `promote: false` to skip promotion and keep the file in `:cache` state.
+    Pass `promote: false` to skip marking the file permanent and keep it as pending.
     """
     def cast_attachments(%Ecto.Changeset{} = changeset, keys, opts \\ []) do
       Enum.reduce(keys, changeset, &cast_attachment(&2, &1, opts))
@@ -107,22 +105,22 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         file_id == current_id ->
           changeset
 
-        storage in ["cache", :cache] ->
-          handle_cached_resubmit(changeset, key, json, map, opts)
+        storage in ["store", :store] ->
+          handle_pending_resubmit(changeset, key, json, map, opts)
 
         true ->
           add_error(changeset, key, "no file provided")
       end
     end
 
-    defp handle_cached_resubmit(changeset, key, json, map, opts) do
+    defp handle_pending_resubmit(changeset, key, json, map, opts) do
       uploader_name = map["uploader"] || map[:uploader]
       uploader = String.to_existing_atom(uploader_name)
 
       case uploader.deserialize(json) do
-        {:ok, cached_file} ->
+        {:ok, file} ->
           prev_file = get_existing_file(changeset.data, key)
-          schedule_promote(changeset, key, cached_file, prev_file, opts)
+          schedule_mark_permanent(changeset, key, file, prev_file, opts)
 
         {:error, reason} ->
           add_error(changeset, key, "invalid attachment: #{inspect(reason)}")
@@ -148,22 +146,14 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       end)
     end
 
-    defp handle_deferred_promote(changeset, key, opts) do
-      existing = get_existing_file(changeset.data, key)
-
-      case existing do
-        %{storage: :cache} = cached_file ->
-          call_opts = build_call_opts(opts)
-
+    defp handle_deferred_promote(changeset, key, _opts) do
+      case get_existing_file(changeset.data, key) do
+        %{id: _} = file ->
           changeset
-          |> force_change(key, cached_file)
+          |> force_change(key, file)
           |> prepare_changes(fn cs ->
-            with {:ok, stored_file} <- uploader_for(cached_file).promote(cached_file, call_opts) do
-              put_change(cs, key, stored_file)
-            else
-              {:error, reason} ->
-                add_error(cs, key, "promote failed: #{inspect(reason)}")
-            end
+            EmAttachments.Upload.mark_permanent(cs.repo, file.id)
+            cs
           end)
 
         _ ->
@@ -175,9 +165,9 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       uploader = changeset.types[key]
 
       case uploader.upload(source) do
-        {:ok, cached_file} ->
+        {:ok, file} ->
           prev_file = get_existing_file(changeset.data, key)
-          schedule_promote(changeset, key, cached_file, prev_file, opts)
+          schedule_mark_permanent(changeset, key, file, prev_file, opts)
 
         {:error, reason} ->
           add_error(changeset, key, "upload failed: #{inspect(reason)}")
@@ -207,27 +197,19 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       end
     end
 
-    defp schedule_promote(changeset, key, cached_file, prev_file, opts) do
-      call_opts = build_call_opts(opts)
-
+    defp schedule_mark_permanent(changeset, key, file, prev_file, opts) do
       if opts[:promote] == false do
-        put_change(changeset, key, cached_file)
+        put_change(changeset, key, file)
       else
         changeset
-        |> put_change(key, cached_file)
+        |> put_change(key, file)
         |> prepare_changes(fn cs ->
-          with {:ok, stored_file} <- uploader_for(cached_file).promote(cached_file, call_opts) do
-            if prev_file, do: delete_file(prev_file)
-            put_change(cs, key, stored_file)
-          else
-            {:error, reason} ->
-              add_error(cs, key, "upload failed: #{inspect(reason)}")
-          end
+          EmAttachments.Upload.mark_permanent(cs.repo, file.id)
+          if prev_file, do: delete_file(prev_file)
+          cs
         end)
       end
     end
-
-    defp build_call_opts(opts), do: Keyword.drop(opts, [:promote, :reprocess])
 
     defp handle_reprocess(changeset, key) do
       case get_existing_file(changeset.data, key) do
