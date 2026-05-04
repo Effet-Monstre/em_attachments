@@ -226,14 +226,15 @@ The result (`%{sha256: "..."}`) is available at `file.metadata.plugins.hash`.
 
 ### Plugin callbacks
 
-| Callback | Phase | Purpose |
-|---|---|---|
-| `cast/2` | before upload | Convert a raw changeset value into a `SourceFile` |
-| `init/2` | cache only | Cheap one-time init (e.g. hash, detect type). Runs before `upload/3`. |
-| `upload/3` | cache + store | Upload-time work; receives `{:cache, …}` or `{:store, …}` storage tuple |
-| `validate/3` | cache | Validate after cache upload; return `:ok` or `{:error, message}` |
-| `destroy/2` | on delete | Clean up derived assets when the parent file is deleted |
-| `url/3` | on URL resolution | Return a custom URL for this plugin's data, or `:skip` to pass |
+| Callback | Purpose |
+|---|---|
+| `cast/2` | Convert a raw changeset value into a `SourceFile` |
+| `init/2` | Cheap one-time init (e.g. hash, detect type). Runs before `upload/3`. |
+| `upload/3` | Upload-time work; receives `{backend_mod, backend_opts}` storage tuple |
+| `validate/3` | Validate after upload; return `:ok` or `{:error, message}` |
+| `destroy/2` | Clean up derived assets when the parent file is deleted |
+| `url/3` | Return a custom URL for this plugin's data, or `:skip` to pass |
+| `after_confirm/2` | Called by the Sweeper after a pending upload is confirmed permanent |
 
 ### Declaring plugin dependencies
 
@@ -244,7 +245,7 @@ defmodule MyApp.ConditionalPlugin do
   use EmAttachments.Plugin, depends_on: [mime: EmAttachments.Plugins.Mime]
 
   @impl true
-  def upload(_source, {:cache, _mod, _opts}, ctx) do
+  def upload(_source, {_backend_mod, _backend_opts}, ctx) do
     case ctx.deps[:mime] do
       %{type: "image/" <> _} -> {:ok, %{is_image: true}}
       _ -> {:ok, %{is_image: false}}

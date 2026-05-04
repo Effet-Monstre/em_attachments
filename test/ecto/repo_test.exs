@@ -281,6 +281,45 @@ defmodule EmAttachments.EctoRepoTest do
     assert loaded_thumb.storage == :store
   end
 
+  # ── Transaction rollback ───────────────────────────────────────────────────
+
+  test "DB constraint failure after mark_permanent rolls back the tracking row update" do
+    # Create a user whose name we will conflict with in the failing insert
+    {:ok, _} = Repo.insert(DbUser.changeset(%{"name" => "ConstraintTarget"}))
+
+    # Insert a pending tracking row with a known asset_id
+    asset_id = "rollback-#{System.unique_integer([:positive])}"
+    expires = DateTime.add(DateTime.utc_now(), 3600, :second)
+
+    {:ok, _} =
+      EmAttachments.Upload.insert_pending(Repo, %{
+        asset_id: asset_id,
+        uploader: to_string(BasicUploader),
+        serialized:
+          Jason.encode!(%{id: asset_id, storage: "store", uploader: to_string(BasicUploader)}),
+        status: "pending",
+        expires_at: expires
+      })
+
+    # Build a valid changeset: prepare_changes calls mark_permanent, but the insert
+    # will fail due to the unique constraint on name.
+    cs =
+      DbUser.changeset(%{"name" => "ConstraintTarget"})
+      |> prepare_changes(fn cs ->
+        EmAttachments.Upload.mark_permanent(cs.repo, asset_id)
+        cs
+      end)
+
+    # The insert fails; mark_permanent ran inside the transaction but is rolled back
+    assert {:error, failed_cs} = Repo.insert(cs)
+    assert failed_cs.errors[:name] != nil
+
+    # The tracking row is still pending — the mark_permanent UPDATE was rolled back
+    import Ecto.Query
+    [row] = Repo.all(from u in EmAttachments.Upload, where: u.asset_id == ^asset_id)
+    assert row.status == "pending"
+  end
+
   # ── Helpers ────────────────────────────────────────────────────────────────
 
   defp insert_user_with_avatar! do

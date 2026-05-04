@@ -63,41 +63,63 @@ defmodule MyApp.AvatarUploader do
 end
 ```
 
-## Upload → Promote Lifecycle
+## Upload Lifecycle
 
-Every file goes through a two-phase lifecycle: **cache** on receive, **store** on save.
+Every file is uploaded directly to the store backend. When used with Ecto, the upload is registered as pending and confirmed atomically inside the database transaction.
 
 ```elixir
-# 1. Upload a file (writes to cache, runs all plugins + validations)
-{:ok, cached_file} = AvatarUploader.upload(plug_upload_or_temp_file)
+# 1. Upload a file (writes to store, runs all plugins + validations)
+{:ok, file} = AvatarUploader.upload(plug_upload_or_temp_file)
 
-# cached_file.storage  => :cache
-# cached_file.metadata => %{size: 42000, filename: "photo.jpg",
-#                           plugins: %{mime: %{type: "image/jpeg", extension: "jpg"},
-#                                      dimensions: %{width: 800, height: 600}}}
+# file.storage  => :store
+# file.metadata => %{size: 42000, filename: "photo.jpg",
+#                    plugins: %{mime: %{type: "image/jpeg", extension: "jpg"},
+#                               dimensions: %{width: 800, height: 600}}}
 
-# 2. Promote to permanent storage (copies to store, runs store-phase plugins, deletes cache copy)
-{:ok, stored_file} = AvatarUploader.promote(cached_file)
+# 2. Get the URL
+url = AvatarUploader.url(file)
 
-# stored_file.storage => :store
-
-# 3. Get the URL
-url = AvatarUploader.url(stored_file)
-
-# 4. Delete (removes file + all derivatives from store)
-AvatarUploader.delete(stored_file)
+# 3. Delete (removes file + all derivatives from store)
+AvatarUploader.delete(file)
 ```
 
 | Step | What happens |
 |---|---|
-| `upload/1` | Writes to cache backend, runs all plugins, returns a file with metadata |
-| `promote/1` | Copies to store, re-runs store-phase plugins, deletes the cache copy |
+| `upload/1` | Writes to store backend, runs all plugins, returns a file with metadata |
 | `url/1` | Returns the public URL from the storage backend |
 | `delete/1` | Removes the file and all its derivatives |
 
 ## Ecto Integration
 
 When `ecto` is available, each uploader is also an `Ecto.Type` and can be used as a field type directly.
+
+### 1. Generate the tracking migration
+
+```bash
+mix em_attachments.gen.migration
+mix ecto.migrate
+```
+
+This creates the `em_attachments_uploads` table used to track pending uploads and confirm them atomically with your Ecto transactions.
+
+### 2. Configure repo and Sweeper
+
+```elixir
+# config/config.exs
+config :em_attachments, :config,
+  repo: MyApp.Repo
+
+# application.ex
+children = [
+  MyApp.Repo,
+  EmAttachments.Sweeper,
+  ...
+]
+```
+
+The Sweeper is a GenServer that periodically cleans up expired pending uploads and finalizes confirmed ones (e.g. updating S3 ACLs).
+
+### 3. Define your schema
 
 ```elixir
 defmodule MyApp.User do
@@ -120,10 +142,10 @@ end
 
 | Param value | Behaviour |
 |---|---|
-| `%Plug.Upload{}` | Upload to cache; promote to store inside Ecto transaction |
-| `{:url, url}` | Download from `url`, then upload and promote |
+| `%Plug.Upload{}` | Upload to store; mark permanent inside Ecto transaction |
+| `{:url, url}` | Download from `url`, then upload and mark permanent |
 | `{:binary, data}` | Treat raw bytes as an in-memory file and run the upload pipeline |
 | `{:binary, data, filename}` | Same as above with a given filename |
 | `nil` or `""` | Delete existing file inside transaction; set field to `nil` |
-| Signed JSON string | Re-submit cached file; promote on save |
+| Signed JSON string | Re-submit a pending file; mark permanent on save |
 | Key absent from params | No-op |
