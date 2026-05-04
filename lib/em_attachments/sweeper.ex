@@ -94,7 +94,7 @@ defmodule EmAttachments.Sweeper do
           {backend_mod, backend_opts} = Config.store(uploader.__uploader_opts__())
 
           if function_exported?(backend_mod, :finalize, 2) do
-            case backend_mod.finalize(file.id, finalize_opts) do
+            case backend_mod.finalize(file.id, Keyword.merge(backend_opts, finalize_opts)) do
               :ok ->
                 :ok
 
@@ -113,7 +113,7 @@ defmodule EmAttachments.Sweeper do
           # Derivative rows carry a minimal serialized struct (no metadata).
           # `after_confirm` is only meaningful for the full file — skip for derivatives.
           if not is_nil(file.metadata) do
-            run_after_confirm(uploader, file, {backend_mod, backend_opts})
+            run_after_confirm(uploader, file, {backend_mod, backend_opts}, finalize_opts)
           end
 
         {:error, reason} ->
@@ -126,12 +126,17 @@ defmodule EmAttachments.Sweeper do
     end
   end
 
-  defp run_after_confirm(uploader, file, backend) do
+  defp run_after_confirm(uploader, file, backend, finalize_opts) do
     ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
 
     for {key, mod, plugin_opts} <- ordered,
         function_exported?(mod, :after_confirm, 2) do
-      mod.after_confirm(file, %{plugin_key: key, plugin_opts: plugin_opts, backend: backend})
+      mod.after_confirm(file, %{
+        plugin_key: key,
+        plugin_opts: plugin_opts,
+        backend: backend,
+        finalize_opts: finalize_opts
+      })
     end
   end
 

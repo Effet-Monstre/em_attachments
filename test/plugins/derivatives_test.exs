@@ -4,13 +4,29 @@ defmodule EmAttachments.Plugins.DerivativesTest do
   alias EmAttachments.{Plugins.Derivatives, SourceFile, TempFile, MemoryFile, Backends.Local}
   alias EmAttachments.Test.Fixtures
 
-  setup do
-    dir = Path.join(System.tmp_dir!(), "deriv_test_#{unique()}")
-    File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf!(dir) end)
-    backend = {Local, [fs_path: dir, render_path: "/files"]}
-    {:ok, backend: backend}
+  # ---------------------------------------------------------------------------
+  # Spy backends — records finalize/2 calls as messages to the calling process.
+  # self() inside finalize/2 is the process that called after_confirm/2, which is
+  # the test process when tests invoke Derivatives.after_confirm/2 synchronously.
+  # ---------------------------------------------------------------------------
+
+  defmodule SpyBackend do
+    def finalize(id, opts) do
+      send(self(), {:finalize, id, opts})
+      :ok
+    end
   end
+
+  defmodule SpyBackendNotFound do
+    def finalize(id, _opts) do
+      send(self(), {:finalize, id})
+      {:error, :not_found}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Test uploaders / fixture helpers
+  # ---------------------------------------------------------------------------
 
   defmodule UploaderWithDerivatives do
     def handle(:derivatives, %{file: file}) do
@@ -24,13 +40,13 @@ defmodule EmAttachments.Plugins.DerivativesTest do
   defmodule UploaderWithTempFileDerivative do
     def handle(:derivatives, %{file: file}) do
       input = SourceFile.local_path!(file)
-      output = Path.join(System.tmp_dir!(), "deriv_tf_#{unique()}.copy")
+      output = Path.join(System.tmp_dir!(), "deriv_tf_#{rand_id()}.copy")
       File.cp!(input, output)
       %{processed: TempFile.new(output, "processed")}
     end
 
     def handle(_, _), do: :skip
-    defp unique, do: :crypto.strong_rand_bytes(4) |> Base.url_encode64(padding: false)
+    defp rand_id, do: :crypto.strong_rand_bytes(4) |> Base.url_encode64(padding: false)
   end
 
   defmodule UploaderWithMemoryFileDerivative do
@@ -66,8 +82,33 @@ defmodule EmAttachments.Plugins.DerivativesTest do
     def handle(_, _), do: :skip
   end
 
+  # ---------------------------------------------------------------------------
+  # Setup
+  # ---------------------------------------------------------------------------
+
+  setup do
+    dir = Path.join(System.tmp_dir!(), "deriv_test_#{unique()}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+    backend = {Local, [fs_path: dir, render_path: "/files"]}
+    {:ok, backend: backend}
+  end
+
   defp upload_ctx(uploader, deps \\ %{}),
     do: %{plugin_key: :derivatives, uploader: uploader, deps: deps, plugin_opts: []}
+
+  defp file_with_variants(variants) do
+    %{
+      id: "main",
+      storage: :store,
+      metadata: %{
+        size: 0,
+        filename: "img.png",
+        plugins: %{derivatives: %{variants: variants}}
+      },
+      uploader: "T"
+    }
+  end
 
   # ---------------------------------------------------------------------------
   # upload/3
@@ -87,8 +128,6 @@ defmodule EmAttachments.Plugins.DerivativesTest do
     end
 
     test "returns :skip when handle/2 returns :skip", %{backend: {mod, opts}} do
-      uploader = %{handle: fn _, _ -> :skip end}
-
       defmodule SkipUploader do
         def handle(_, _), do: :skip
       end
@@ -122,6 +161,120 @@ defmodule EmAttachments.Plugins.DerivativesTest do
       for {_key, %{id: id}} <- data.variants do
         refute File.exists?(Path.join(opts[:fs_path], id))
       end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # after_confirm/2
+  # ---------------------------------------------------------------------------
+
+  describe "after_confirm/2" do
+    test "calls finalize on each derivative with merged opts when backend exports finalize/2" do
+      file =
+        file_with_variants(%{
+          thumb: %{id: "deriv-thumb", storage: :store},
+          small: %{id: "deriv-small", storage: :store}
+        })
+
+      ctx = %{
+        plugin_key: :derivatives,
+        plugin_opts: [],
+        backend: {SpyBackend, [bucket: "mybucket", acl: :private]},
+        finalize_opts: [acl: :public_read]
+      }
+
+      assert :ok = Derivatives.after_confirm(file, ctx)
+
+      # Both variants must be finalized with merged opts (finalize_opts overrides backend_opts)
+      ids_finalized =
+        for _ <- 1..2 do
+          assert_receive {:finalize, id, opts}
+          assert opts[:acl] == :public_read
+          assert opts[:bucket] == "mybucket"
+          id
+        end
+
+      assert Enum.sort(ids_finalized) == ["deriv-small", "deriv-thumb"]
+      refute_received {:finalize, _, _}
+    end
+
+    test "handles nested derivative trees" do
+      file =
+        file_with_variants(%{
+          group: %{
+            large: %{id: "nested-large", storage: :store},
+            small: %{id: "nested-small", storage: :store}
+          }
+        })
+
+      ctx = %{
+        plugin_key: :derivatives,
+        plugin_opts: [],
+        backend: {SpyBackend, []},
+        finalize_opts: [acl: :public_read]
+      }
+
+      assert :ok = Derivatives.after_confirm(file, ctx)
+
+      ids = for _ <- 1..2, do: (assert_receive({:finalize, id, _}); id)
+      assert Enum.sort(ids) == ["nested-large", "nested-small"]
+    end
+
+    test "skips finalize when backend does not export finalize/2" do
+      file = file_with_variants(%{thumb: %{id: "deriv-1", storage: :store}})
+
+      ctx = %{
+        plugin_key: :derivatives,
+        plugin_opts: [],
+        backend: {Local, [fs_path: "/tmp", render_path: "/f"]},
+        finalize_opts: [acl: :public_read]
+      }
+
+      assert :ok = Derivatives.after_confirm(file, ctx)
+      refute_received {:finalize, _, _}
+    end
+
+    test "returns :ok and logs warning when backend returns {:error, :not_found}" do
+      file = file_with_variants(%{thumb: %{id: "gone", storage: :store}})
+
+      ctx = %{
+        plugin_key: :derivatives,
+        plugin_opts: [],
+        backend: {SpyBackendNotFound, []},
+        finalize_opts: []
+      }
+
+      assert :ok = Derivatives.after_confirm(file, ctx)
+      assert_received {:finalize, "gone"}
+    end
+
+    test "returns :ok when file has no derivatives" do
+      file = file_with_variants(%{})
+
+      ctx = %{
+        plugin_key: :derivatives,
+        plugin_opts: [],
+        backend: {SpyBackend, []},
+        finalize_opts: []
+      }
+
+      assert :ok = Derivatives.after_confirm(file, ctx)
+      refute_received {:finalize, _, _}
+    end
+
+    test "defaults finalize_opts to [] when key is absent from ctx" do
+      file = file_with_variants(%{thumb: %{id: "d1", storage: :store}})
+
+      # ctx without :finalize_opts — should not crash; ACL stays as the backend default
+      ctx = %{
+        plugin_key: :derivatives,
+        plugin_opts: [],
+        backend: {SpyBackend, [acl: :private]}
+      }
+
+      assert :ok = Derivatives.after_confirm(file, ctx)
+      assert_receive {:finalize, "d1", opts}
+      assert opts[:acl] == :private
     end
   end
 

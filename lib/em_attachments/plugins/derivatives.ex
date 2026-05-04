@@ -24,6 +24,8 @@ defmodule EmAttachments.Plugins.Derivatives do
 
   use EmAttachments.Plugin
 
+  require Logger
+
   alias EmAttachments.{Cmd, MemoryFile, SourceFile, TempFile, Util}
 
   @impl true
@@ -59,6 +61,36 @@ defmodule EmAttachments.Plugins.Derivatives do
   def asset_ids(file, ctx) do
     own_data = get_in(file.metadata, [:plugins, ctx.plugin_key]) || %{}
     collect_ids(own_data)
+  end
+
+  @impl true
+  def after_confirm(file, ctx) do
+    {backend_mod, backend_opts} = ctx.backend
+
+    if function_exported?(backend_mod, :finalize, 2) do
+      finalize_opts = Map.get(ctx, :finalize_opts, [])
+      merged_opts = Keyword.merge(backend_opts, finalize_opts)
+      own_data = get_in(file.metadata, [:plugins, ctx.plugin_key]) || %{}
+
+      for id <- collect_ids(own_data) do
+        case backend_mod.finalize(id, merged_opts) do
+          :ok ->
+            :ok
+
+          {:error, :not_found} ->
+            Logger.warning(
+              "EmAttachments.Plugins.Derivatives: asset #{id} not found during after_confirm"
+            )
+
+          {:error, reason} ->
+            Logger.error(
+              "EmAttachments.Plugins.Derivatives: finalize failed for #{id}: #{inspect(reason)}"
+            )
+        end
+      end
+    end
+
+    :ok
   end
 
   @impl true

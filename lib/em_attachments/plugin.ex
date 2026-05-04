@@ -101,11 +101,21 @@ defmodule EmAttachments.Plugin do
   Called by the Sweeper after a pending upload row is confirmed as permanent.
 
   Use this for post-confirmation side effects such as updating ACLs on derived assets.
-  `ctx.backend` is `{backend_mod, backend_opts}`.
+
+  `ctx` fields:
+    - `backend` — `{backend_mod, backend_opts}` for the store
+    - `finalize_opts` — extra opts from `Config.finalize_opts/0`, merged on top of
+      `backend_opts` before passing to `backend_mod.finalize/2`
+    - `plugin_key`, `plugin_opts` — standard plugin context fields
   """
   @callback after_confirm(
               file :: struct(),
-              ctx :: %{plugin_key: atom(), plugin_opts: keyword(), backend: {module(), keyword()}}
+              ctx :: %{
+                plugin_key: atom(),
+                plugin_opts: keyword(),
+                backend: {module(), keyword()},
+                finalize_opts: keyword()
+              }
             ) :: :ok | {:error, term()}
 
   @doc """
