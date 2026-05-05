@@ -8,7 +8,8 @@ if Code.ensure_loaded?(Ecto.Schema) do
 
     @primary_key {:id, :id, autogenerate: true}
 
-    schema "em_attachments_uploads" do
+    @em_config Application.compile_env(:em_attachments, :config, [])
+    schema Keyword.get(@em_config, :table_name, "em_attachments_uploads") do
       field :asset_id, :string
       field :uploader, :string
       field :serialized, :string

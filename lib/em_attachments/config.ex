@@ -45,6 +45,11 @@ defmodule EmAttachments.Config do
     all()[:sweeper_interval] || @default_sweeper_interval
   end
 
+  @doc "Returns the uploads table name (default: \"em_attachments_uploads\")."
+  def table_name do
+    all()[:table_name] || "em_attachments_uploads"
+  end
+
   @doc """
   Returns the default plugins prepended to every uploader's plugin list.
 
