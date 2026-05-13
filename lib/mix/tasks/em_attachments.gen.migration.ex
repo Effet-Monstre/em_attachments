@@ -22,7 +22,7 @@ defmodule Mix.Tasks.EmAttachments.Gen.Migration do
 
       config :em_attachments, :config, table_name: :my_uploads
 
-  The generated migration will call `create_em_attachments_uploads_table(:my_uploads)`.
+  The generated migration will call `create_uploads_table(:my_uploads)`.
   """
 
   @switches [repo: :string]
@@ -98,10 +98,10 @@ defmodule Mix.Tasks.EmAttachments.Gen.Migration do
     """
     defmodule #{inspect(mod)} do
       use Ecto.Migration
-      import EmAttachments.Migration
+      use EmAttachments.Migration
 
       def change do
-        create_em_attachments_uploads_table#{table_arg}
+        create_uploads_table#{table_arg}
       end
     end
     """
