@@ -26,11 +26,15 @@ defmodule EmAttachments.Migration do
 
   ## Examples
 
-      # No schema (non-Postgres default)
+      # Auto-detects adapter: uses em_attachments.uploads on Postgres,
+      # em_attachments_uploads flat table on other adapters.
       create_uploads_table()
 
-      # With schema (Postgres default)
+      # Explicit schema (overrides auto-detection)
       create_uploads_table(schema: "em_attachments")
+
+      # Opt out of schema even on Postgres
+      create_uploads_table(schema: nil)
 
       # Custom table and schema
       create_uploads_table(schema: "myapp", table: :file_uploads)
@@ -40,7 +44,15 @@ defmodule EmAttachments.Migration do
   defmacro create_uploads_table(opts \\ []) do
     schema_stmts =
       quote do
-        schema_name = Keyword.get(unquote(opts), :schema)
+        schema_name =
+          case Keyword.fetch(unquote(opts), :schema) do
+            {:ok, val} ->
+              val
+
+            :error ->
+              if repo().__adapter__() == Ecto.Adapters.Postgres, do: "em_attachments", else: nil
+          end
+
         schema_str = if schema_name, do: to_string(schema_name), else: nil
         table_atom = Keyword.get(unquote(opts), :table, if(schema_str, do: :uploads, else: :em_attachments_uploads))
 
