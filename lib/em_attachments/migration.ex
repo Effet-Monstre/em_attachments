@@ -14,24 +14,53 @@ defmodule EmAttachments.Migration do
         end
       end
 
-  Pass an atom to use a custom table name:
+  ## Options
 
-      create_uploads_table(:my_uploads)
+    * `:schema` — database schema name (string or atom). When given, the macro
+      emits `CREATE SCHEMA IF NOT EXISTS` and creates the table with a prefix.
+      Defaults to `"em_attachments"` on PostgreSQL when auto-detected by
+      `mix em_attachments.gen.migration`.
+
+    * `:table` — table name atom. Defaults to `:uploads` when `:schema` is set,
+      `:em_attachments_uploads` otherwise.
+
+  ## Examples
+
+      # No schema (non-Postgres default)
+      create_uploads_table()
+
+      # With schema (Postgres default)
+      create_uploads_table(schema: "em_attachments")
+
+      # Custom table and schema
+      create_uploads_table(schema: "myapp", table: :file_uploads)
+
   """
 
-  defmacro create_uploads_table(table_name \\ :em_attachments_uploads) do
-    quote do
-      create table(unquote(table_name)) do
-        add(:asset_id, :string, null: false)
-        add(:uploader, :string, null: false)
-        add(:serialized, :text, null: false)
-        add(:status, :string, null: false, default: "pending")
-        add(:expires_at, :utc_datetime_usec, null: false)
-        timestamps(updated_at: false)
+  defmacro create_uploads_table(opts \\ []) do
+    schema_stmts =
+      quote do
+        schema_name = Keyword.get(unquote(opts), :schema)
+        schema_str = if schema_name, do: to_string(schema_name), else: nil
+        table_atom = Keyword.get(unquote(opts), :table, if(schema_str, do: :uploads, else: :em_attachments_uploads))
+
+        if schema_str do
+          execute("CREATE SCHEMA IF NOT EXISTS \"#{schema_str}\"")
+        end
+
+        create table(table_atom, prefix: schema_str) do
+          add(:asset_id, :string, null: false)
+          add(:uploader, :string, null: false)
+          add(:serialized, :text, null: false)
+          add(:status, :string, null: false, default: "pending")
+          add(:expires_at, :utc_datetime_usec, null: false)
+          timestamps(updated_at: false)
+        end
+
+        create(index(table_atom, [:status, :expires_at], prefix: schema_str))
+        create(unique_index(table_atom, [:asset_id], prefix: schema_str))
       end
 
-      create(index(unquote(table_name), [:status, :expires_at]))
-      create(unique_index(unquote(table_name), [:asset_id]))
-    end
+    schema_stmts
   end
 end

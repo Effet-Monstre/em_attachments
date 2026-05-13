@@ -45,9 +45,17 @@ defmodule EmAttachments.Config do
     all()[:sweeper_interval] || @default_sweeper_interval
   end
 
-  @doc "Returns the uploads table name (default: \"em_attachments_uploads\")."
+  @doc "Returns the uploads schema name (default: nil — no schema)."
+  def schema_name do
+    all()[:schema_name]
+  end
+
+  @doc "Returns the uploads table name. Defaults to \"uploads\" when a schema is configured, \"em_attachments_uploads\" otherwise."
   def table_name do
-    all()[:table_name] || "em_attachments_uploads"
+    case all()[:table_name] do
+      nil -> if schema_name(), do: "uploads", else: "em_attachments_uploads"
+      name -> name
+    end
   end
 
   @doc """
