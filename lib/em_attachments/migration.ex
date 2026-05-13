@@ -34,10 +34,4 @@ defmodule EmAttachments.Migration do
       create(unique_index(unquote(table_name), [:asset_id]))
     end
   end
-
-  defmacro __using__(_) do
-    quote do
-      import EmAttachments.Migration
-    end
-  end
 end

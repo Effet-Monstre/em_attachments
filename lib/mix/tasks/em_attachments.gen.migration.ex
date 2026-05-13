@@ -43,7 +43,7 @@ defmodule Mix.Tasks.EmAttachments.Gen.Migration do
 
     table_arg =
       if table_name == default_table,
-        do: "",
+        do: "()",
         else: "(#{inspect(String.to_atom(table_name))})"
 
     timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
