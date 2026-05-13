@@ -45,9 +45,25 @@ defmodule EmAttachments.Config do
     all()[:sweeper_interval] || @default_sweeper_interval
   end
 
-  @doc "Returns the uploads schema name (default: nil — no schema)."
+  @doc "Returns the uploads schema name. Auto-detects \"em_attachments\" on PostgreSQL repos when not explicitly configured."
   def schema_name do
-    all()[:schema_name]
+    case all()[:schema_name] do
+      nil ->
+        case repo() do
+          nil ->
+            nil
+
+          r ->
+            if Code.ensure_loaded?(r) and
+                 function_exported?(r, :__adapter__, 0) and
+                 r.__adapter__() == Ecto.Adapters.Postgres,
+               do: "em_attachments",
+               else: nil
+        end
+
+      val ->
+        val
+    end
   end
 
   @doc "Returns the uploads table name. Defaults to \"uploads\" when a schema is configured, \"em_attachments_uploads\" otherwise."
