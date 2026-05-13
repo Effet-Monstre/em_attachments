@@ -3,11 +3,22 @@ defmodule EmAttachments.SweeperTest do
 
   @moduletag :db
 
+  import Ecto.Query
+
   alias EmAttachments.Test.{Repo, NoPluginUploader, DerivativeUploader, Fixtures}
   alias EmAttachments.{Upload, Sweeper}
 
   setup do
     :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    original_config = EmAttachments.Config.all()
+
+    Application.put_env(
+      :em_attachments,
+      :config,
+      Keyword.merge(original_config, schema_name: "em_attachments", table_name: "uploads")
+    )
+
+    on_exit(fn -> Application.put_env(:em_attachments, :config, original_config) end)
     :ok
   end
 
@@ -62,7 +73,7 @@ defmodule EmAttachments.SweeperTest do
 
       Sweeper.sweep(Repo)
 
-      [row] = Repo.all(Upload)
+      [row] = Repo.all(from(u in {upload_source(), Upload}), prefix: upload_prefix())
       assert row.status == "pending"
       assert row.asset_id == file.id
     end
@@ -255,6 +266,9 @@ defmodule EmAttachments.SweeperTest do
 
     row
   end
+
+  defp upload_source, do: EmAttachments.Config.table_name()
+  defp upload_prefix, do: EmAttachments.Config.schema_name()
 
   defp past, do: DateTime.add(DateTime.utc_now(), -3600, :second)
   defp future, do: DateTime.add(DateTime.utc_now(), 3600, :second)

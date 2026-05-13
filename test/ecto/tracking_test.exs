@@ -60,30 +60,28 @@ defmodule EmAttachments.TrackingTest do
     test "inserts one pending row for the main file ID" do
       {:ok, file} = DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"})
 
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
     end
 
     test "inserts one pending row for each derivative ID" do
       {:ok, file} = DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"})
       deriv_id = file.metadata.plugins.derivatives.variants.copy.id
 
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^deriv_id)
+      assert [%Upload{status: "pending"}] = uploads_for(deriv_id)
     end
 
     test "total row count is 1 (main) + number of derivative variants" do
       # DerivativeUploader produces one 'copy' variant → expect 2 rows
       {:ok, _file} = DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"})
 
-      assert Repo.aggregate(Upload, :count) == 2
+      assert upload_count() == 2
     end
 
     test "derivative row carries minimal serialized JSON (no full metadata)" do
       {:ok, file} = DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"})
       deriv_id = file.metadata.plugins.derivatives.variants.copy.id
 
-      [row] = Repo.all(from u in Upload, where: u.asset_id == ^deriv_id)
+      [row] = uploads_for(deriv_id)
       parsed = Jason.decode!(row.serialized)
 
       assert parsed["id"] == deriv_id
@@ -115,11 +113,8 @@ defmodule EmAttachments.TrackingTest do
       file = user.avatar
       deriv_id = file.metadata.plugins.derivatives.variants.copy.id
 
-      assert [%Upload{status: "permanent"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
-
-      assert [%Upload{status: "permanent"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^deriv_id)
+      assert [%Upload{status: "permanent"}] = uploads_for(file.id)
+      assert [%Upload{status: "permanent"}] = uploads_for(deriv_id)
     end
 
     test "with promote: false, all rows remain pending after insert" do
@@ -139,11 +134,8 @@ defmodule EmAttachments.TrackingTest do
       file = user.avatar
       deriv_id = file.metadata.plugins.derivatives.variants.copy.id
 
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
-
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^deriv_id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(deriv_id)
     end
 
     test "promote: true on an existing file marks main and derivative rows permanent" do
@@ -164,8 +156,7 @@ defmodule EmAttachments.TrackingTest do
       deriv_id = file.metadata.plugins.derivatives.variants.copy.id
 
       # Rows are still pending
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
 
       # Now promote via cast_attachments promote: true
       promote_cs =
@@ -174,11 +165,8 @@ defmodule EmAttachments.TrackingTest do
 
       {:ok, _} = Repo.update(promote_cs)
 
-      assert [%Upload{status: "permanent"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
-
-      assert [%Upload{status: "permanent"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^deriv_id)
+      assert [%Upload{status: "permanent"}] = uploads_for(file.id)
+      assert [%Upload{status: "permanent"}] = uploads_for(deriv_id)
     end
   end
 
@@ -192,11 +180,8 @@ defmodule EmAttachments.TrackingTest do
       deriv_id = file.metadata.plugins.derivatives.variants.copy.id
 
       # Both rows start as pending
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
-
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^deriv_id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(deriv_id)
 
       # mark_permanent inside a transaction that is then rolled back
       assert {:error, :test_rollback} =
@@ -206,11 +191,8 @@ defmodule EmAttachments.TrackingTest do
                end)
 
       # Both rows must be back to "pending"
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
-
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^deriv_id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(deriv_id)
     end
 
     test "prepare_changes rollback (DB-level transaction failure) reverts all rows" do
@@ -240,11 +222,8 @@ defmodule EmAttachments.TrackingTest do
       assert {:error, :simulated_failure} = Repo.insert(cs)
 
       # mark_permanent ran inside the transaction but was rolled back — rows stay pending.
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
-
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^deriv_id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(deriv_id)
     end
   end
 
@@ -267,17 +246,15 @@ defmodule EmAttachments.TrackingTest do
       {:ok, user} = Repo.insert(cs)
       file = user.avatar
 
-      assert [%Upload{status: "permanent"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [%Upload{status: "permanent"}] = uploads_for(file.id)
 
       Ecto.Changeset.change(user)
       |> cast_attachments([:avatar])
       |> Repo.delete()
 
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
 
-      [row] = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      [row] = uploads_for(file.id)
       assert DateTime.compare(row.expires_at, DateTime.utc_now()) != :gt
     end
 
@@ -296,15 +273,14 @@ defmodule EmAttachments.TrackingTest do
       file = user.avatar
 
       # Simulate sweeper having already cleaned up all tracking rows
-      Repo.delete_all(from u in Upload, where: u.asset_id == ^file.id)
-      assert [] = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      delete_uploads_for(file.id)
+      assert [] = uploads_for(file.id)
 
       Ecto.Changeset.change(user)
       |> cast_attachments([:avatar])
       |> Repo.delete()
 
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
     end
 
     test "rollback on delete does not leave a pending row behind" do
@@ -322,7 +298,7 @@ defmodule EmAttachments.TrackingTest do
       file = user.avatar
 
       # Simulate sweeper having cleaned up so there is no pre-existing row to complicate assertions
-      Repo.delete_all(from u in Upload, where: u.asset_id == ^file.id)
+      delete_uploads_for(file.id)
 
       assert {:error, :simulated_failure} =
                Repo.transaction(fn ->
@@ -333,7 +309,7 @@ defmodule EmAttachments.TrackingTest do
                  Repo.rollback(:simulated_failure)
                end)
 
-      assert [] = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [] = uploads_for(file.id)
     end
 
     @tag :local_backend
@@ -362,14 +338,13 @@ defmodule EmAttachments.TrackingTest do
       |> cast_attachments([:avatar])
       |> Repo.delete()
 
-      assert [%Upload{status: "pending"}] =
-               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [%Upload{status: "pending"}] = uploads_for(file.id)
 
       EmAttachments.Sweeper.sweep(Repo)
 
       refute File.exists?(Path.join(store_path, file.id))
       refute File.exists?(Path.join(store_path, deriv_id))
-      assert [] = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [] = uploads_for(file.id)
     end
 
     test "cast_attachments on a regular insert does not produce a spurious delete-pending row" do
@@ -386,7 +361,7 @@ defmodule EmAttachments.TrackingTest do
       {:ok, user} = Repo.insert(cs)
       file = user.avatar
 
-      rows = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      rows = uploads_for(file.id)
       assert length(rows) == 1
       assert hd(rows).status == "permanent"
     end
@@ -397,4 +372,29 @@ defmodule EmAttachments.TrackingTest do
   # ---------------------------------------------------------------------------
 
   defp unique_name, do: "user-#{System.unique_integer([:positive])}"
+
+  defp upload_source, do: EmAttachments.Config.table_name()
+  defp upload_prefix, do: EmAttachments.Config.schema_name()
+
+  defp uploads_for(asset_id) do
+    Repo.all(
+      from(u in {upload_source(), Upload}, where: u.asset_id == ^asset_id),
+      prefix: upload_prefix()
+    )
+  end
+
+  defp delete_uploads_for(asset_id) do
+    Repo.delete_all(
+      from(u in {upload_source(), Upload}, where: u.asset_id == ^asset_id),
+      prefix: upload_prefix()
+    )
+  end
+
+  defp upload_count do
+    Repo.aggregate(
+      from(u in {upload_source(), Upload}),
+      :count,
+      prefix: upload_prefix()
+    )
+  end
 end

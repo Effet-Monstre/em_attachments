@@ -207,7 +207,7 @@ defmodule EmAttachments.EctoTest do
     cs = changeset(record, %{"avatar" => other_json}) |> cast_attachments([:avatar])
 
     assert cs.valid?
-    assert length(cs.prepare) == 1
+    assert length(cs.prepare) == 2
   end
 
   test "pending file JSON from failed form resubmission is marked permanent on commit" do
@@ -312,7 +312,7 @@ defmodule EmAttachments.EctoTest do
 
     cs = changeset(record, %{}) |> cast_attachments([:avatar], promote: true)
 
-    assert length(cs.prepare) == 1
+    assert length(cs.prepare) == 2
 
     cs2 = commit(cs)
     assert cs2.valid?

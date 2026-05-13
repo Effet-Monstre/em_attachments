@@ -10,6 +10,9 @@ defmodule EmAttachments.EctoRepoTest do
 
   setup do
     :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    original_config = EmAttachments.Config.all()
+    Application.put_env(:em_attachments, :config, Keyword.put(original_config, :repo, Repo))
+    on_exit(fn -> Application.put_env(:em_attachments, :config, original_config) end)
     :ok
   end
 
@@ -179,7 +182,7 @@ defmodule EmAttachments.EctoRepoTest do
       DbUser.changeset(loaded, %{})
       |> cast_attachments([:avatar], promote: true)
 
-    assert length(promote_cs.prepare) == 1
+    assert length(promote_cs.prepare) == 2
 
     {:ok, promoted} = Repo.update(promote_cs)
     assert promoted.avatar.storage == :store
@@ -315,8 +318,10 @@ defmodule EmAttachments.EctoRepoTest do
     assert failed_cs.errors[:name] != nil
 
     # The tracking row is still pending — the mark_permanent UPDATE was rolled back
+    table = EmAttachments.Config.table_name()
+    prefix = EmAttachments.Config.schema_name()
     import Ecto.Query
-    [row] = Repo.all(from u in EmAttachments.Upload, where: u.asset_id == ^asset_id)
+    [row] = Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^asset_id), prefix: prefix)
     assert row.status == "pending"
   end
 

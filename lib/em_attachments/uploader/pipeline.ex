@@ -153,7 +153,7 @@ defmodule EmAttachments.Uploader.Pipeline do
     EmAttachments.Upload.upsert_pending(repo, %{
       asset_id: file.id,
       uploader: to_string(uploader),
-      serialized: Jason.encode!(file),
+      serialized: serialize(uploader, file),
       status: "pending",
       expires_at: now
     })
