@@ -147,6 +147,20 @@ defmodule EmAttachments.Uploader.Pipeline do
   Calls `Upload.mark_permanent/2` for the root file ID, then iterates plugins that
   export `asset_ids/2` and marks each returned ID as well.
   """
+  def mark_pending_for_deletion(repo, uploader, file) do
+    now = DateTime.utc_now()
+
+    EmAttachments.Upload.upsert_pending(repo, %{
+      asset_id: file.id,
+      uploader: to_string(uploader),
+      serialized: Jason.encode!(file),
+      status: "pending",
+      expires_at: now
+    })
+
+    :ok
+  end
+
   def mark_permanent(repo, uploader, file) do
     EmAttachments.Upload.mark_permanent(repo, file.id)
 

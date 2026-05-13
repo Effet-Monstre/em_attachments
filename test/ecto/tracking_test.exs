@@ -249,6 +249,150 @@ defmodule EmAttachments.TrackingTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Record deletion — enqueue as pending
+  # ---------------------------------------------------------------------------
+
+  describe "cast_attachments + Repo.delete (record deletion)" do
+    test "resets permanent tracking row to pending when record is deleted" do
+      upload = %Plug.Upload{
+        path: Fixtures.png_path(),
+        filename: "a.png",
+        content_type: "image/png"
+      }
+
+      cs =
+        DerivativeDbUser.changeset(%{"name" => unique_name(), "avatar" => upload})
+        |> cast_attachments([:avatar])
+
+      {:ok, user} = Repo.insert(cs)
+      file = user.avatar
+
+      assert [%Upload{status: "permanent"}] =
+               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+
+      Ecto.Changeset.change(user)
+      |> cast_attachments([:avatar])
+      |> Repo.delete()
+
+      assert [%Upload{status: "pending"}] =
+               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+
+      [row] = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert DateTime.compare(row.expires_at, DateTime.utc_now()) != :gt
+    end
+
+    test "inserts new pending row when no tracking row exists (sweeper already ran)" do
+      upload = %Plug.Upload{
+        path: Fixtures.png_path(),
+        filename: "a.png",
+        content_type: "image/png"
+      }
+
+      cs =
+        DerivativeDbUser.changeset(%{"name" => unique_name(), "avatar" => upload})
+        |> cast_attachments([:avatar])
+
+      {:ok, user} = Repo.insert(cs)
+      file = user.avatar
+
+      # Simulate sweeper having already cleaned up all tracking rows
+      Repo.delete_all(from u in Upload, where: u.asset_id == ^file.id)
+      assert [] = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+
+      Ecto.Changeset.change(user)
+      |> cast_attachments([:avatar])
+      |> Repo.delete()
+
+      assert [%Upload{status: "pending"}] =
+               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+    end
+
+    test "rollback on delete does not leave a pending row behind" do
+      upload = %Plug.Upload{
+        path: Fixtures.png_path(),
+        filename: "a.png",
+        content_type: "image/png"
+      }
+
+      cs =
+        DerivativeDbUser.changeset(%{"name" => unique_name(), "avatar" => upload})
+        |> cast_attachments([:avatar])
+
+      {:ok, user} = Repo.insert(cs)
+      file = user.avatar
+
+      # Simulate sweeper having cleaned up so there is no pre-existing row to complicate assertions
+      Repo.delete_all(from u in Upload, where: u.asset_id == ^file.id)
+
+      assert {:error, :simulated_failure} =
+               Repo.transaction(fn ->
+                 Ecto.Changeset.change(user)
+                 |> cast_attachments([:avatar])
+                 |> Repo.delete()
+
+                 Repo.rollback(:simulated_failure)
+               end)
+
+      assert [] = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+    end
+
+    @tag :local_backend
+    test "sweeper deletes main file and derivatives from storage after record delete" do
+      upload = %Plug.Upload{
+        path: Fixtures.png_path(),
+        filename: "a.png",
+        content_type: "image/png"
+      }
+
+      cs =
+        DerivativeDbUser.changeset(%{"name" => unique_name(), "avatar" => upload})
+        |> cast_attachments([:avatar])
+
+      {:ok, user} = Repo.insert(cs)
+      file = user.avatar
+      deriv_id = file.metadata.plugins.derivatives.variants.copy.id
+
+      {_mod, store_opts} = EmAttachments.Config.store()
+      store_path = store_opts[:fs_path]
+
+      assert File.exists?(Path.join(store_path, file.id))
+      assert File.exists?(Path.join(store_path, deriv_id))
+
+      Ecto.Changeset.change(user)
+      |> cast_attachments([:avatar])
+      |> Repo.delete()
+
+      assert [%Upload{status: "pending"}] =
+               Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+
+      EmAttachments.Sweeper.sweep(Repo)
+
+      refute File.exists?(Path.join(store_path, file.id))
+      refute File.exists?(Path.join(store_path, deriv_id))
+      assert [] = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+    end
+
+    test "cast_attachments on a regular insert does not produce a spurious delete-pending row" do
+      upload = %Plug.Upload{
+        path: Fixtures.png_path(),
+        filename: "a.png",
+        content_type: "image/png"
+      }
+
+      cs =
+        DerivativeDbUser.changeset(%{"name" => unique_name(), "avatar" => upload})
+        |> cast_attachments([:avatar])
+
+      {:ok, user} = Repo.insert(cs)
+      file = user.avatar
+
+      rows = Repo.all(from u in Upload, where: u.asset_id == ^file.id)
+      assert length(rows) == 1
+      assert hd(rows).status == "permanent"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
 

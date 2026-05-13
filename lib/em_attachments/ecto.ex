@@ -63,6 +63,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       do: cast_attachment(changeset, String.to_existing_atom(key), opts)
 
     defp cast_attachment(changeset, key, opts) do
+      changeset = register_delete_cleanup(changeset, key)
       promote_opt = Keyword.get(opts, :promote, :default)
       params = changeset.params || %{}
 
@@ -132,6 +133,22 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         changeset
       else
         add_error(changeset, key, "no file provided")
+      end
+    end
+
+    defp register_delete_cleanup(changeset, key) do
+      case get_existing_file(changeset.data, key) do
+        %{id: _} = file ->
+          prepare_changes(changeset, fn cs ->
+            if cs.action == :delete do
+              file.__struct__.mark_pending_for_deletion(cs.repo, file)
+            end
+
+            cs
+          end)
+
+        _ ->
+          changeset
       end
     end
 

@@ -222,6 +222,10 @@ defmodule EmAttachments.Uploader do
         EmAttachments.Uploader.Pipeline.mark_permanent(repo, __MODULE__, file)
       end
 
+      def mark_pending_for_deletion(repo, file) do
+        EmAttachments.Uploader.Pipeline.mark_pending_for_deletion(repo, __MODULE__, file)
+      end
+
       def reprocess(file) do
         EmAttachments.Uploader.Pipeline.reprocess(__MODULE__, file)
       end

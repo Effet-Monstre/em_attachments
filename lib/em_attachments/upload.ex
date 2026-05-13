@@ -29,6 +29,17 @@ if Code.ensure_loaded?(Ecto.Schema) do
       |> repo.insert()
     end
 
+    def upsert_pending(repo, attrs) do
+      %__MODULE__{}
+      |> Ecto.put_meta(source: em_source(), prefix: em_prefix())
+      |> cast(attrs, [:asset_id, :uploader, :serialized, :status, :expires_at])
+      |> validate_required([:asset_id, :uploader, :serialized, :expires_at])
+      |> repo.insert(
+        on_conflict: [set: [status: "pending", expires_at: attrs[:expires_at]]],
+        conflict_target: :asset_id
+      )
+    end
+
     def mark_permanent(nil, _asset_id), do: :ok
 
     def mark_permanent(repo, asset_id) do
