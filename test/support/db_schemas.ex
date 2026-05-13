@@ -12,7 +12,9 @@ if Code.ensure_loaded?(Ecto.Schema) and Code.ensure_loaded?(Ecto.Adapters.Postgr
     end
 
     def changeset(user \\ %__MODULE__{}, attrs) do
-      cast(user, attrs, [:name])
+      user
+      |> cast(attrs, [:name])
+      |> unique_constraint(:name)
     end
   end
 

@@ -77,9 +77,9 @@ defmodule EmAttachments.Test.InitAndUploadPlugin do
   end
 
   @impl true
-  def upload(_source, {storage, _, _}, ctx) do
+  def upload(_source, {_backend_mod, _backend_opts}, ctx) do
     from_init = ctx.deps[ctx.plugin_key][:from_init]
-    {:ok, %{saw_init: from_init == true, storage: storage, from_init: from_init}}
+    {:ok, %{saw_init: from_init == true, from_init: from_init}}
   end
 end
 

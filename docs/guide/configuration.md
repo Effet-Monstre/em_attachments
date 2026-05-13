@@ -6,10 +6,9 @@ Add to `config/config.exs`:
 
 ```elixir
 config :em_attachments,
-  secret_key: "long-random-secret",   # required — used to sign cache file IDs
+  secret_key: "long-random-secret",   # required — used to sign file IDs
   config: [
-    store: {EmAttachments.Backends.S3, bucket: "my-bucket", acl: :public_read},
-    cache: [prefix: "cache"]          # inherits store backend, merges opts on top
+    store: {EmAttachments.Backends.S3, bucket: "my-bucket", acl: :public_read}
   ]
 ```
 
@@ -19,20 +18,57 @@ For local development use `EmAttachments.Backends.Local`:
 config :em_attachments,
   secret_key: "dev-secret",
   config: [
-    store: {EmAttachments.Backends.Local, fs_path: "/var/app/store", render_path: "/files/store"},
-    cache: {EmAttachments.Backends.Local, fs_path: "/var/app/cache", render_path: "/files/cache"}
+    store: {EmAttachments.Backends.Local, fs_path: "/var/app/store", render_path: "/files/store"}
   ]
 ```
 
 ### `secret_key`
 
-Required. Used to HMAC-sign cache file IDs to prevent enumeration. Generate one with:
+Required. Used to HMAC-sign file IDs to prevent enumeration. Generate one with:
 
 ```bash
 mix phx.gen.secret
 ```
 
 Or any 64-character random string.
+
+### `repo`
+
+Optional. The `Ecto.Repo` module used to track pending uploads. Required for Ecto integration.
+
+```elixir
+config :em_attachments, :config,
+  repo: MyApp.Repo
+```
+
+When set, each upload inserts a `pending` row into `em_attachments_uploads` immediately after the file is written to the backend. `cast_attachments/3` calls `mark_permanent` inside the Ecto transaction to confirm the upload atomically.
+
+### `expiry`
+
+How long (in milliseconds) a pending upload row survives before the Sweeper deletes it. Defaults to `86_400_000` (24 hours).
+
+```elixir
+config :em_attachments, :config,
+  expiry: :timer.hours(48)
+```
+
+### `sweeper_interval`
+
+How often (in milliseconds) the `EmAttachments.Sweeper` GenServer polls for expired pending uploads. Defaults to `1_800_000` (30 minutes).
+
+```elixir
+config :em_attachments, :config,
+  sweeper_interval: :timer.minutes(10)
+```
+
+### `finalize_opts`
+
+Options passed to `backend.finalize/2` when the Sweeper confirms permanent uploads. Useful for backends that need post-confirmation steps (e.g. updating an S3 object's ACL).
+
+```elixir
+config :em_attachments, :config,
+  finalize_opts: [acl: :public_read]
+```
 
 ### Env-var expansion
 
@@ -46,6 +82,35 @@ store: {EmAttachments.Backends.S3,
 ```
 
 The third element of the tuple is an optional fallback used when the variable is unset.
+
+---
+
+## Ecto tracking table
+
+Run the provided mix task to generate the migration:
+
+```bash
+mix em_attachments.gen.migration
+mix ecto.migrate
+```
+
+The `em_attachments_uploads` table stores one row per pending upload. Rows transition from `pending` to `permanent` inside your Ecto transaction via `mark_permanent`, then the Sweeper finalizes and removes them in the background.
+
+---
+
+## Sweeper
+
+Add `EmAttachments.Sweeper` to your supervision tree:
+
+```elixir
+children = [
+  MyApp.Repo,
+  EmAttachments.Sweeper,
+  MyAppWeb.Endpoint
+]
+```
+
+The Sweeper is a no-op (`:ignore`) when no `repo` is configured.
 
 ---
 
@@ -89,8 +154,6 @@ The third element of the tuple is an optional fallback used when the variable is
 
 No ExAws dependency — uses AWS Signature v4 directly via `req`.
 
-When promoting from cache to the same S3 bucket, the backend performs a server-side `CopyObject` — the file is never downloaded locally.
-
 ### Presigned uploads
 
 For direct browser-to-S3 uploads, generate presigned POST credentials:
@@ -116,5 +179,8 @@ defmodule MyApp.GCSBackend do
   def delete(id, opts), do: ...
   def url(id, opts), do: ...
   def presign_upload(id, opts), do: ...
+
+  # Optional: called by the Sweeper after confirming a permanent upload
+  def finalize(id, opts), do: ...
 end
 ```
