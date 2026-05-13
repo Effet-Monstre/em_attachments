@@ -6,31 +6,22 @@ File.mkdir_p!(tmp_dir)
 # ── Backend config — S3 when TEST_S3_BUCKET is set, else Local ────────────
 s3_bucket = System.get_env("TEST_S3_BUCKET")
 
-{store_backend, cache_backend} =
+store_backend =
   if s3_bucket do
-    s3_opts = fn prefix ->
-      {EmAttachments.Backends.S3,
-       bucket: s3_bucket,
-       prefix: prefix,
-       access_key_id: {:env, "AWS_ACCESS_KEY_ID"},
-       secret_access_key: {:env, "AWS_SECRET_ACCESS_KEY"},
-       region: {:env, "AWS_REGION", "us-east-1"},
-       acl: :private}
-    end
-
-    {s3_opts.("em_test_store"), s3_opts.("em_test_cache")}
+    {EmAttachments.Backends.S3,
+     bucket: s3_bucket,
+     prefix: "em_test_store",
+     access_key_id: {:env, "AWS_ACCESS_KEY_ID"},
+     secret_access_key: {:env, "AWS_SECRET_ACCESS_KEY"},
+     region: {:env, "AWS_REGION", "us-east-1"},
+     acl: :private}
   else
-    {
-      {EmAttachments.Backends.Local,
-       fs_path: Path.join(tmp_dir, "store"), render_path: "/files/store"},
-      {EmAttachments.Backends.Local,
-       fs_path: Path.join(tmp_dir, "cache"), render_path: "/files/cache"}
-    }
+    {EmAttachments.Backends.Local,
+     fs_path: Path.join(tmp_dir, "store"), render_path: "/files/store"}
   end
 
 Application.put_env(:em_attachments, :config,
   store: store_backend,
-  cache: cache_backend,
   secret_key: "test-secret-key-for-hmac-signing"
 )
 

@@ -31,12 +31,6 @@ end
 
 The plugin uploads all derivatives in parallel and stores their backend IDs under `file.metadata.plugins.derivatives.variants`.
 
----
-
-## Generic handler (same derivatives for cache and store)
-
-When `handle/2` matches only `%{file: file}` (no `:store` key), the plugin treats cache and store identically. On promotion it **copies** the cached derivatives to the store backend — no re-generation. This is the most common pattern:
-
 ```elixir
 def handle(:derivatives, %{file: file}) do
   path = EmAttachments.SourceFile.local_path!(file)
@@ -48,34 +42,6 @@ def handle(:derivatives, %{file: file}) do
   %{thumb: thumb_bin, medium: medium_bin}
 end
 ```
-
-On S3 this copy is a server-side `CopyObject` — the file is never downloaded to your server.
-
----
-
-## Phase-specific handlers
-
-Match on the `:store` key to run different logic during cache vs. store:
-
-```elixir
-# Cache phase: cheap low-quality thumb for preview
-def handle(:derivatives, %{file: file, store: :cache}) do
-  path = EmAttachments.SourceFile.local_path!(file)
-  %{thumb: generate_thumb(path, quality: :low)}
-end
-
-# Store phase: high-quality thumb + additional sizes
-def handle(:derivatives, %{file: file, store: :store}) do
-  path = EmAttachments.SourceFile.local_path!(file)
-  %{
-    thumb:   generate_thumb(path, quality: :high),
-    medium:  generate_medium(path),
-    original: path          # path string — no copy needed
-  }
-end
-```
-
-During promotion the plugin calls the `:store` clause first. If that returns `:skip`, it falls back to the generic clause (without a `:store` key).
 
 ---
 

@@ -10,6 +10,20 @@ defmodule EmAttachments.Backends.S3 do
     - `:secret_access_key` — defaults to `AWS_SECRET_ACCESS_KEY` env var
     - `:acl` — `:private` (default) | `:public_read` | `:authenticated_read`
     - `:url_expires_in` — presigned URL TTL in seconds, defaults to 3600
+
+  ## Finalization / ACL promotion
+
+  When the Sweeper confirms a permanent upload it calls `finalize/2` with opts merged
+  from the backend config and `Config.finalize_opts/0`. Use `finalize_opts` to supply
+  the desired target ACL:
+
+      config :em_attachments, :config,
+        finalize_opts: [acl: :public_read]
+
+  `finalize/2` issues a `PutObjectAcl` request (`PUT ?acl=`) for the object and returns
+  `:ok` on success, `{:error, :not_found}` if the object is gone, or `{:error, reason}`
+  for other errors. The Derivatives plugin's `after_confirm/2` callback propagates this
+  call to every derivative variant automatically.
   """
 
   @behaviour EmAttachments.Backend
@@ -80,6 +94,20 @@ defmodule EmAttachments.Backends.S3 do
     bucket_url = build_bucket_url(bucket, opts)
     {url, fields} = Signer.presign_post(bucket_url, bucket, "#{prefix}/#{id}", expires_in, opts)
     {:ok, %{url: url, fields: fields}}
+  end
+
+  @impl true
+  def finalize(id, opts) do
+    url = "#{object_url(id, opts)}?acl="
+    acl = opts[:acl] || :private
+    headers = Signer.sign_request(:put, url, acl_header(acl), "", opts)
+
+    case Req.put(url, headers: headers, body: "") do
+      {:ok, %{status: s}} when s in 200..299 -> :ok
+      {:ok, %{status: 404}} -> {:error, :not_found}
+      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp object_url(id, opts) do

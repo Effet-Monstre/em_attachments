@@ -2,9 +2,7 @@
 
 File attachment library for Elixir, inspired by [Shrine](https://shrinerb.com) for Rails.
 
-Upload files to cache on receive, promote them to permanent storage on save, run plugins
-(MIME detection, dimension validation, derivative generation) at each phase, and store the
-result as a structured metadata map in your database.
+Upload files directly to permanent storage, run plugins (MIME detection, dimension validation, derivative generation) during the pipeline, and store the result as a structured metadata map in your database.
 
 ## Installation
 
@@ -33,10 +31,9 @@ end
 ```elixir
 # config/config.exs
 config :em_attachments,
-  secret_key: "long-random-secret",   # required — used to sign cache file IDs
+  secret_key: "long-random-secret",   # required — used to sign file IDs
   config: [
-    store: {EmAttachments.Backends.S3, bucket: "my-bucket", acl: :public_read},
-    cache: [prefix: "cache"]          # inherits store backend, merges opts on top
+    store: {EmAttachments.Backends.S3, bucket: "my-bucket", acl: :public_read}
   ]
 ```
 
@@ -46,8 +43,7 @@ For local development use `EmAttachments.Backends.Local`:
 config :em_attachments,
   secret_key: "dev-secret",
   config: [
-    store: {EmAttachments.Backends.Local, fs_path: "/var/app/store", render_path: "/files/store"},
-    cache: {EmAttachments.Backends.Local, fs_path: "/var/app/cache", render_path: "/files/cache"}
+    store: {EmAttachments.Backends.Local, fs_path: "/var/app/store", render_path: "/files/store"}
   ]
 ```
 
@@ -91,32 +87,49 @@ defmodule MyApp.AvatarUploader do
 end
 ```
 
-### Upload → promote lifecycle
+### Upload lifecycle
 
 ```elixir
-# 1. Upload a file (writes to cache, runs all plugins + validations)
-{:ok, cached_file} = AvatarUploader.upload(plug_upload_or_temp_file)
+# 1. Upload a file (writes to store, runs all plugins + validations)
+{:ok, file} = AvatarUploader.upload(plug_upload_or_temp_file)
 
-# cached_file.storage  => :cache
-# cached_file.metadata => %{size: 42000, filename: "photo.jpg",
-#                           plugins: %{mime: %{type: "image/jpeg", extension: "jpg"},
-#                                      dimensions: %{width: 800, height: 600}}}
+# file.storage  => :store
+# file.metadata => %{size: 42000, filename: "photo.jpg",
+#                    plugins: %{mime: %{type: "image/jpeg", extension: "jpg"},
+#                               dimensions: %{width: 800, height: 600}}}
 
-# 2. Promote to permanent storage (copies to store, runs store-phase plugins, deletes cache copy)
-{:ok, stored_file} = AvatarUploader.promote(cached_file)
+# 2. Get the URL
+url = AvatarUploader.url(file)
 
-# stored_file.storage => :store
-
-# 3. Get the URL
-url = AvatarUploader.url(stored_file)
-
-# 4. Delete (removes file + all derivatives from store)
-AvatarUploader.delete(stored_file)
+# 3. Delete (removes file + all derivatives from store)
+AvatarUploader.delete(file)
 ```
 
 ## Ecto integration
 
 When `ecto` is available, each uploader is also an `Ecto.Type` and can be used as a field type directly.
+
+### Setup
+
+Generate the tracking migration:
+
+```bash
+mix em_attachments.gen.migration
+mix ecto.migrate
+```
+
+Add the repo and Sweeper to your configuration and supervision tree:
+
+```elixir
+# config/config.exs
+config :em_attachments, :config,
+  repo: MyApp.Repo
+
+# application.ex
+children = [MyApp.Repo, EmAttachments.Sweeper, ...]
+```
+
+### Schema
 
 ```elixir
 defmodule MyApp.User do
@@ -139,24 +152,24 @@ end
 
 | Param value | Behaviour |
 |---|---|
-| `%Plug.Upload{}` | Upload to cache; promote to store inside Ecto transaction |
-| `{:url, url}` | Download file from `url` (via `Req`), then upload and promote like a normal file. Filename is derived from the URL path. |
+| `%Plug.Upload{}` | Upload to store; mark permanent inside Ecto transaction |
+| `{:url, url}` | Download file from `url` (via `Req`), then upload and mark permanent. Filename is derived from the URL path. |
 | `{:binary, data}` | Treat `data` (raw bytes) as an in-memory file and run the upload pipeline. Filename defaults to `"upload"`. |
 | `{:binary, data, filename}` | Same as above but uses the given `filename`. |
 | `nil` or `""` | Delete existing file inside transaction; set field to `nil` |
-| Signed JSON string (from prior serialize call) | Re-submit cached file; promote on save |
+| JSON string (from prior serialize call) | Re-submit a pending file; mark permanent on save |
 | Bare file ID string matching current field | No-op |
 | Key absent from params | No-op (unless `promote: true` / `reprocess: true`) |
 
-### Deferred promotion
+### Deferred confirmation
 
-Keep the file in `:cache` state and promote later (e.g. from a background job):
+Upload on receive but skip marking permanent until later (e.g. from a background job or a two-step wizard):
 
 ```elixir
-# On form submit — saves as :cache
+# On form submit — file is in store but not yet confirmed
 cast_attachments(changeset, [:avatar], promote: false)
 
-# In a background job — promotes the cached file to :store
+# Later (separate request or background job) — confirms the file
 cast_attachments(changeset, [:avatar], promote: true)
 ```
 
@@ -197,9 +210,6 @@ cast_attachments(changeset, [:avatar], reprocess: true)
 
 No ExAws dependency — uses AWS Signature v4 directly via `req`.
 
-When promoting from a cache bucket to the same S3 bucket, the backend performs a server-side
-`CopyObject` so the file is never downloaded locally.
-
 ### Presigned uploads
 
 For direct browser-to-S3 uploads, generate presigned POST credentials:
@@ -223,6 +233,9 @@ defmodule MyApp.GCSBackend do
   def delete(id, opts), do: ...
   def url(id, opts), do: ...
   def presign_upload(id, opts), do: ...
+
+  # Optional: called by the Sweeper after confirming a permanent upload
+  def finalize(id, opts), do: ...
 end
 ```
 
@@ -275,24 +288,11 @@ plugin derivatives: EmAttachments.Plugins.Derivatives
 Define `handle/2` in your uploader to produce derivatives:
 
 ```elixir
-# Generic handler — same derivatives for both phases; cached copies are promoted to
-# store automatically (no re-generation):
 def handle(:derivatives, %{file: file}) do
   path = EmAttachments.SourceFile.local_path!(file)
   {:ok, resized} = Image.thumbnail(path, 80)
   {:ok, small_bin} = Image.write_to_buffer(resized, ".png")
   %{small: small_bin}
-end
-
-# Phase-specific handlers — different derivatives per phase:
-def handle(:derivatives, %{file: file, store: :cache}) do
-  path = EmAttachments.SourceFile.local_path!(file)
-  %{thumb: make_thumb(path)}
-end
-
-def handle(:derivatives, %{file: file, store: :store}) do
-  path = EmAttachments.SourceFile.local_path!(file)
-  %{thumb: make_thumb(path), large: make_large(path)}
 end
 ```
 
@@ -315,24 +315,18 @@ small_thumb_url = AvatarUploader.url(file, derivatives: [:thumb, :small])
 
 ```elixir
 defmodule MyApp.HashPlugin do
-  use EmAttachments.Plugin, depends_on: [mime: EmAttachments.Plugins.Mime]
+  use EmAttachments.Plugin
 
-  # init/5 runs in the cache phase only; result available in deps[plugin_key]
-  # before upload/6 is called:
   @impl true
-  def init(source, _key, _uploader, _deps, _opts) do
+  def init(source, _ctx) do
     path = EmAttachments.SourceFile.local_path!(source)
-    {:ok, content} = File.read(path)
-    {:ok, %{sha256: Base.encode16(:crypto.hash(:sha256, content))}}
+    {:ok, %{sha256: Base.encode16(:crypto.hash(:sha256, File.read!(path)))}}
   end
 
-  # upload/6 runs in both phases; deps[plugin_key] contains the init result:
   @impl true
-  def upload(_source, key, _uploader, deps, _opts, {:store, _mod, _opts}) do
-    {:ok, %{stored_hash: deps[key][:sha256]}}
+  def upload(_source, {_backend_mod, _backend_opts}, ctx) do
+    {:ok, %{stored_hash: ctx.deps[ctx.plugin_key][:sha256]}}
   end
-
-  def upload(_, _, _, _, _, _), do: :skip
 end
 ```
 
@@ -340,11 +334,13 @@ Plugin callbacks (all optional):
 
 | Callback | When called |
 |---|---|
-| `init/5` | Cache phase only (skipped if result already seeded from cache phase) |
-| `upload/6` | Both phases; receives init result in `deps[plugin_key]` |
-| `validate/4` | After upload, when uploader declares `validates plugin_key: opts` |
-| `destroy/4` | When parent file is deleted |
-| `url/5` | When resolving a URL; return `{:ok, url}` to short-circuit |
+| `cast/2` | Before upload — convert a raw param value into a `SourceFile` |
+| `init/2` | Before `upload/3` — cheap one-time work (hash, type detection) |
+| `upload/3` | During upload — receives `{backend_mod, backend_opts}` tuple |
+| `validate/3` | After upload — return `:ok` or `{:error, message}` |
+| `destroy/2` | When parent file is deleted |
+| `url/3` | When resolving a URL — return `{:ok, url}` to short-circuit |
+| `after_confirm/2` | Called by Sweeper after a pending upload is confirmed permanent |
 
 ## Direct browser uploads (AJAX)
 
@@ -362,7 +358,7 @@ Submit the JSON string as a hidden input value; `cast_attachments/3` will pick i
 
 ## Per-call backend overrides
 
-Override the store or cache backend for a single call:
+Override the store backend for a single call:
 
 ```elixir
 # Use a different uploader-level backend just for this upload:
@@ -374,14 +370,12 @@ AvatarUploader.upload(file, dimensions: [adapter: MyApp.FastAdapter])
 
 ## Serialization
 
-Cache files are HMAC-signed to prevent enumeration and tampering:
+Files are HMAC-signed to prevent enumeration and tampering:
 
 ```elixir
-json = AvatarUploader.serialize(cached_file)
+json = AvatarUploader.serialize(file)
 # => signed JSON string safe to embed in an HTML form
 
 {:ok, file} = AvatarUploader.deserialize(json)
 # => verifies signature, returns the file struct
 ```
-
-Store files serialize without a signature (the ID is already in the database).
