@@ -158,7 +158,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       changeset
       |> put_change(key, nil)
       |> prepare_changes(fn cs ->
-        if prev && prev.id, do: delete_file(prev)
+        if prev && prev.id, do: prev.__struct__.mark_pending_for_deletion(cs.repo, prev)
         cs
       end)
     end
@@ -222,7 +222,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         |> put_change(key, file)
         |> prepare_changes(fn cs ->
           file.__struct__.mark_permanent(cs.repo, file)
-          if prev_file, do: delete_file(prev_file)
+          if prev_file, do: prev_file.__struct__.mark_pending_for_deletion(cs.repo, prev_file)
           cs
         end)
       end
@@ -265,9 +265,6 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       String.to_existing_atom(uploader_str)
     end
 
-    defp delete_file(file) do
-      uploader = uploader_for(file)
-      if Code.ensure_loaded?(uploader), do: uploader.delete(file)
-    end
+
   end
 end
