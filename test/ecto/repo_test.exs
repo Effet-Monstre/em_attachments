@@ -82,9 +82,8 @@ defmodule EmAttachments.EctoRepoTest do
 
   # ── File removal ───────────────────────────────────────────────────────────
 
-  test "nil avatar param deletes file from store and sets DB column to nil" do
+  test "nil avatar param marks old file pending for deletion and sets DB column to nil" do
     user = insert_user_with_avatar!()
-    {_mod, store_opts} = EmAttachments.Config.store()
     original_id = user.avatar.id
 
     cs =
@@ -96,12 +95,14 @@ defmodule EmAttachments.EctoRepoTest do
     {:ok, updated} = Repo.update(cs)
     assert updated.avatar == nil
 
-    if match?({EmAttachments.Backends.Local, _}, EmAttachments.Config.store()) do
-      refute File.exists?(Path.join(store_opts[:fs_path], original_id))
-    end
-
     reloaded = Repo.get!(DbUser, user.id)
     assert reloaded.avatar == nil
+
+    import Ecto.Query
+    table = EmAttachments.Config.table_name()
+    prefix = EmAttachments.Config.schema_name()
+    rows = Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^original_id), prefix: prefix)
+    assert [%{status: "pending"}] = rows
   end
 
   # ── No argument passed ─────────────────────────────────────────────────────
@@ -123,10 +124,9 @@ defmodule EmAttachments.EctoRepoTest do
 
   # ── Replace file ───────────────────────────────────────────────────────────
 
-  test "uploading a new file replaces old file in store and DB" do
+  test "uploading a new file replaces old file in store and DB, marking old as pending for deletion" do
     user = insert_user_with_avatar!()
     original_id = user.avatar.id
-    {_mod, store_opts} = EmAttachments.Config.store()
 
     new_upload = %Plug.Upload{
       path: Fixtures.png_path(),
@@ -143,12 +143,14 @@ defmodule EmAttachments.EctoRepoTest do
     assert updated.avatar.metadata.filename == "new.png"
     assert updated.avatar.id != original_id
 
-    if match?({EmAttachments.Backends.Local, _}, EmAttachments.Config.store()) do
-      refute File.exists?(Path.join(store_opts[:fs_path], original_id))
-    end
-
     reloaded = Repo.get!(DbUser, user.id)
     assert reloaded.avatar.id == updated.avatar.id
+
+    import Ecto.Query
+    table = EmAttachments.Config.table_name()
+    prefix = EmAttachments.Config.schema_name()
+    rows = Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^original_id), prefix: prefix)
+    assert [%{status: "pending"}] = rows
   end
 
   # ── Delayed promote ────────────────────────────────────────────────────────
