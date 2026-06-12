@@ -21,6 +21,8 @@ if Code.ensure_loaded?(Ecto.Schema) do
       timestamps(updated_at: false)
     end
 
+    def insert_pending(nil, _attrs), do: :ok
+
     def insert_pending(repo, attrs) do
       %__MODULE__{}
       |> Ecto.put_meta(source: em_source(), prefix: em_prefix())
@@ -28,6 +30,8 @@ if Code.ensure_loaded?(Ecto.Schema) do
       |> validate_required([:asset_id, :uploader, :serialized, :expires_at])
       |> repo.insert()
     end
+
+    def upsert_pending(nil, _attrs), do: :ok
 
     def upsert_pending(repo, attrs) do
       %__MODULE__{}

@@ -29,6 +29,7 @@ defmodule EmAttachments.Sweeper do
   alias EmAttachments.Uploader.Topo
 
   @batch_size 100
+  @channel "em_attachments_uploads"
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -43,9 +44,16 @@ defmodule EmAttachments.Sweeper do
       :ignore
     else
       interval = opts[:interval] || Config.sweeper_interval()
+      notifications_pid = maybe_start_notifications(repo)
       schedule(interval)
-      {:ok, %{repo: repo, interval: interval}}
+      {:ok, %{repo: repo, interval: interval, notifications_pid: notifications_pid}}
     end
+  end
+
+  @impl true
+  def handle_info({:notification, _pid, _ref, @channel, payload}, state) do
+    unless delete_notification?(payload), do: sweep(state.repo)
+    {:noreply, state}
   end
 
   @impl true
@@ -138,6 +146,30 @@ defmodule EmAttachments.Sweeper do
         finalize_opts: finalize_opts
       })
     end
+  end
+
+  defp maybe_start_notifications(repo) do
+    if Code.ensure_loaded?(Postgrex.Notifications) and
+         repo.__adapter__() == Ecto.Adapters.Postgres do
+      case apply(Postgrex.Notifications, :start_link, [repo.config()]) do
+        {:ok, pid} ->
+          apply(Postgrex.Notifications, :listen!, [pid, @channel])
+          pid
+
+        {:error, reason} ->
+          Logger.warning(
+            "EmAttachments.Sweeper: could not start notifications listener: #{inspect(reason)}"
+          )
+
+          nil
+      end
+    end
+  end
+
+  defp delete_notification?(payload) do
+    match?(%{"op" => "DELETE"}, Jason.decode!(payload))
+  rescue
+    _ -> false
   end
 
   defp schedule(interval) do

@@ -71,6 +71,46 @@ defmodule EmAttachments.Migration do
 
         create(index(table_atom, [:status, :expires_at], prefix: schema_str))
         create(unique_index(table_atom, [:asset_id], prefix: schema_str))
+
+        notify = Keyword.get(unquote(opts), :notify, true)
+
+        if notify and repo().__adapter__() == Ecto.Adapters.Postgres do
+          qualified_table =
+            if schema_str,
+              do: "\"#{schema_str}\".\"#{table_atom}\"",
+              else: "\"#{table_atom}\""
+
+          fn_schema = if schema_str, do: "\"#{schema_str}\".", else: ""
+          fn_name = "#{fn_schema}em_attachments_notify"
+
+          execute(
+            """
+            CREATE OR REPLACE FUNCTION #{fn_name}()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE payload text;
+            BEGIN
+              IF TG_OP = 'DELETE' THEN
+                payload := '{"op":"DELETE"}';
+              ELSE
+                payload := '{"op":"' || TG_OP || '","status":"' || NEW.status || '"}';
+              END IF;
+              PERFORM pg_notify('em_attachments_uploads', payload);
+              RETURN NULL;
+            END;
+            $$;
+            """,
+            "DROP FUNCTION IF EXISTS #{fn_name}();"
+          )
+
+          execute(
+            """
+            CREATE TRIGGER em_attachments_notify_trigger
+            AFTER INSERT OR UPDATE OR DELETE ON #{qualified_table}
+            FOR EACH ROW EXECUTE FUNCTION #{fn_name}();
+            """,
+            "DROP TRIGGER IF EXISTS em_attachments_notify_trigger ON #{qualified_table};"
+          )
+        end
       end
 
     schema_stmts

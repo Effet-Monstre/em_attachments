@@ -254,6 +254,7 @@ defmodule EmAttachments.Uploader.Pipeline do
             plugin_key: key,
             uploader: uploader,
             deps: deps,
+            plugins: results,
             plugin_opts: plugin_opts
           })
         else
@@ -277,6 +278,7 @@ defmodule EmAttachments.Uploader.Pipeline do
                 plugin_key: key,
                 uploader: uploader,
                 deps: deps,
+                plugins: results,
                 plugin_opts: plugin_opts
               })
             else

@@ -5,7 +5,7 @@ defmodule EmAttachments.Plugin do
   ## Callbacks (all optional)
 
   - `upload/3` — called during the upload pipeline. `storage` is `{backend_mod, backend_opts}`.
-    `ctx` carries `plugin_key`, `uploader`, `deps`, and `plugin_opts`.
+    `ctx` carries `plugin_key`, `uploader`, `deps`, `plugins`, and `plugin_opts`.
     Return `{:ok, fragment}` to store metadata under this plugin's key, or `:skip`
     to leave existing metadata unchanged.
   - `validate/3` — called when the uploader declares `validates plugin_key: opts`.
@@ -26,6 +26,10 @@ defmodule EmAttachments.Plugin do
           {:ok, %{detected: ctx.deps[:mime][:type]}}
         end
       end
+
+  `ctx.deps` holds only the plugins declared via `depends_on`. To read any plugin
+  that ran before this one (without declaring a dependency), use `ctx.plugins` or the
+  `EmAttachments.plugin_data/2` helper: `EmAttachments.plugin_data(ctx, :mime)`.
   """
 
   @optional_callbacks [cast: 2, init: 2, upload: 3, validate: 3, destroy: 2, url: 3, after_confirm: 2, asset_ids: 2]
@@ -49,21 +53,34 @@ defmodule EmAttachments.Plugin do
   """
   @callback init(
               source :: EmAttachments.SourceFile.t(),
-              ctx :: %{plugin_key: atom(), uploader: module(), deps: map(), plugin_opts: keyword()}
+              ctx :: %{
+                plugin_key: atom(),
+                uploader: module(),
+                deps: map(),
+                plugins: map(),
+                plugin_opts: keyword()
+              }
             ) :: {:ok, map()} | :skip | {:error, term()}
 
   @doc """
   Called during the upload pipeline.
 
   `storage` is `{backend_mod, backend_opts}`. `ctx.deps` is a map of results
-  from declared dependency plugins.
+  from declared dependency plugins; `ctx.plugins` holds the results of every plugin
+  that ran before this one, keyed by plugin key.
 
   Return `{:ok, fragment}` to set this plugin's metadata, or `:skip` to leave it unchanged.
   """
   @callback upload(
               source :: EmAttachments.SourceFile.t(),
               storage :: {backend_mod :: module(), backend_opts :: keyword()},
-              ctx :: %{plugin_key: atom(), uploader: module(), deps: map(), plugin_opts: keyword()}
+              ctx :: %{
+                plugin_key: atom(),
+                uploader: module(),
+                deps: map(),
+                plugins: map(),
+                plugin_opts: keyword()
+              }
             ) :: {:ok, map()} | :skip | {:error, term()}
 
   @doc """

@@ -4,7 +4,11 @@ defmodule EmAttachments.Plugins.Derivatives do
 
   Define `handle/2` in your uploader to produce derivatives. The first argument
   is the plugin key as declared in the uploader (not necessarily `:derivatives`).
-  The second is a map containing `:file` (a `EmAttachments.SourceFile.t()`).
+  The second is a map containing:
+
+    - `:file` — a `EmAttachments.SourceFile.t()`
+    - `:plugins` — the data produced by every plugin that ran before this one,
+      keyed by plugin key (e.g. `%{mime: %{type: "image/png", extension: "png"}}`)
 
   Use `EmAttachments.SourceFile.local_path!/1` to get a filesystem path:
 
@@ -13,6 +17,16 @@ defmodule EmAttachments.Plugins.Derivatives do
         {:ok, resized} = Operation.thumbnail(path, 80)
         {:ok, small_bin} = Image.write_to_buffer(resized, ".png")
         %{small: small_bin}
+      end
+
+  Read another plugin's data with `EmAttachments.plugin_data/2` rather than
+  re-detecting it (the `:mime` plugin must be declared before this one):
+
+      def handle(:derivatives, %{file: file} = ctx) do
+        case EmAttachments.plugin_data(ctx, :mime) do
+          %{type: "image/" <> _} -> %{thumb: thumbnail(file)}
+          _ -> :skip
+        end
       end
 
   Map values may be:
@@ -33,7 +47,7 @@ defmodule EmAttachments.Plugins.Derivatives do
     if not function_exported?(ctx.uploader, :handle, 2) do
       :skip
     else
-      case ctx.uploader.handle(ctx.plugin_key, %{file: source}) do
+      case ctx.uploader.handle(ctx.plugin_key, %{file: source, plugins: ctx.plugins}) do
         map when is_map(map) ->
           case upload_derivatives(map, backend_mod, backend_opts, source) do
             {:ok, uploaded} -> {:ok, %{variants: uploaded}}

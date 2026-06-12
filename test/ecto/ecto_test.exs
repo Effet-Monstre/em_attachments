@@ -7,12 +7,33 @@ defmodule EmAttachments.EctoTest do
   alias EmAttachments.Test.{
     BasicUploader,
     DerivativeUploader,
-    DerivativeRecord,
     UserRecord,
     MimeAndDimensionsRecord,
     StrictDimensionsRecord,
+    Repo,
     Fixtures
   }
+
+  alias EmAttachments.Sweeper
+
+  # DB-backed schema (real "users" table). The embedded DerivativeRecord above has no
+  # table, so tests that must run the delete through a real Repo + Sweeper use this.
+  defmodule DerivativeDbRecord do
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key {:id, :binary_id, autogenerate: true}
+
+    schema "users" do
+      field(:name, :string)
+      field(:avatar, EmAttachments.Test.DerivativeUploader)
+      timestamps(type: :utc_datetime_usec)
+    end
+
+    def changeset(record \\ %__MODULE__{}, attrs) do
+      cast(record, attrs, [:name])
+    end
+  end
 
   # Simulates Repo.insert/update: runs prepare_changes callbacks with repo = nil.
   # mark_permanent(nil, _) is a no-op, so these tests exercise the changeset
@@ -24,6 +45,8 @@ defmodule EmAttachments.EctoTest do
   defp plug_upload(path, filename \\ "image.png") do
     %Plug.Upload{path: path, filename: filename, content_type: "image/png"}
   end
+
+  defp unique_name, do: "user-#{System.unique_integer([:positive])}"
 
   defp changeset(%UserRecord{} = record, attrs) do
     cast(record, attrs, [:name])
@@ -251,10 +274,24 @@ defmodule EmAttachments.EctoTest do
     assert cs.valid?
   end
 
+  # Physical deletion is deferred to the Sweeper under the v0.2 architecture, so this
+  # exercises the real Repo + Sweeper rather than the no-DB commit/1 simulation.
+  @tag :db
   @tag :local_backend
-  test "nil param removes all derivative files from the store" do
-    {:ok, file} =
-      DerivativeUploader.upload(%{path: Fixtures.png_path(), filename: "img.png"})
+  test "nil param enqueues old derivative files; sweeper removes them from the store" do
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    original_config = EmAttachments.Config.all()
+    Application.put_env(:em_attachments, :config, Keyword.put(original_config, :repo, Repo))
+    on_exit(fn -> Application.put_env(:em_attachments, :config, original_config) end)
+
+    upload = plug_upload(Fixtures.png_path(), "img.png")
+
+    {:ok, user} =
+      DerivativeDbRecord.changeset(%{"name" => unique_name(), "avatar" => upload})
+      |> cast_attachments([:avatar])
+      |> Repo.insert()
+
+    file = user.avatar
 
     derivative_ids =
       file.metadata.plugins.derivatives.variants
@@ -268,9 +305,15 @@ defmodule EmAttachments.EctoTest do
       assert File.exists?(Path.join(store_fs_path, id)), "expected derivative #{id} to exist"
     end
 
-    record = %DerivativeRecord{id: Ecto.UUID.generate(), avatar: file}
-    cs = cast(record, %{"avatar" => nil}, [:name]) |> cast_attachments([:avatar])
-    commit(cs)
+    # Setting the field to nil enqueues the old file for deletion (marks its tracking
+    # row pending with an immediate expiry); the Sweeper performs the physical delete,
+    # which cascades to the derivative files via the uploader's destroy.
+    {:ok, _} =
+      DerivativeDbRecord.changeset(user, %{"avatar" => nil})
+      |> cast_attachments([:avatar])
+      |> Repo.update()
+
+    Sweeper.sweep(Repo)
 
     for id <- derivative_ids do
       refute File.exists?(Path.join(store_fs_path, id)), "expected derivative #{id} to be deleted"
