@@ -20,10 +20,14 @@ defmodule EmAttachments.Backends.S3 do
       config :em_attachments, :config,
         finalize_opts: [acl: :public_read]
 
-  `finalize/2` issues a `PutObjectAcl` request (`PUT ?acl=`) for the object and returns
-  `:ok` on success, `{:error, :not_found}` if the object is gone, or `{:error, reason}`
-  for other errors. The Derivatives plugin's `after_confirm/2` callback propagates this
-  call to every derivative variant automatically.
+  When an `:acl` is configured, `finalize/2` issues a `PutObjectAcl` request (`PUT ?acl=`)
+  for the object and returns `:ok` on success, `{:error, :not_found}` if the object is
+  gone, or `{:error, reason}` for other errors. The Derivatives plugin's `after_confirm/2`
+  callback propagates this call to every derivative variant automatically.
+
+  When no `:acl` is configured, `finalize/2` is a no-op (`:ok`): the object already has the
+  bucket default after upload, and buckets with Object Ownership "bucket owner enforced"
+  reject ACL requests with `AccessControlListNotSupported`.
   """
 
   @behaviour EmAttachments.Backend
@@ -98,15 +102,24 @@ defmodule EmAttachments.Backends.S3 do
 
   @impl true
   def finalize(id, opts) do
-    url = "#{object_url(id, opts)}?acl="
-    acl = opts[:acl] || :private
-    headers = Signer.sign_request(:put, url, acl_header(acl), "", opts)
+    case opts[:acl] do
+      # No target ACL configured — nothing to promote. Buckets with Object
+      # Ownership "bucket owner enforced" reject any ACL request, and objects
+      # are already created with the bucket default (private) by `put/3`, so
+      # the PutObjectAcl call is both redundant and harmful here.
+      nil ->
+        :ok
 
-    case Req.put(url, headers: headers, body: "") do
-      {:ok, %{status: s}} when s in 200..299 -> :ok
-      {:ok, %{status: 404}} -> {:error, :not_found}
-      {:ok, %{status: s, body: b}} -> {:error, {s, b}}
-      {:error, reason} -> {:error, reason}
+      acl ->
+        url = "#{object_url(id, opts)}?acl="
+        headers = Signer.sign_request(:put, url, acl_header(acl), "", opts)
+
+        case Req.put(url, headers: headers, body: "") do
+          {:ok, %{status: s}} when s in 200..299 -> :ok
+          {:ok, %{status: 404}} -> {:error, :not_found}
+          {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 

@@ -25,12 +25,20 @@ defmodule EmAttachments.Uploader do
           end
         end
 
-        # Generate derivatives (called by EmAttachments.Plugins.Derivatives):
-        def handle(:derivatives, %{file: file}) do
-          path = EmAttachments.SourceFile.local_path!(file)
-          {:ok, resized} = Operation.thumbnail(path, 80)
-          {:ok, small} = Image.write_to_buffer(resized, ".png")
-          %{small: small}
+        # Generate derivatives (called by EmAttachments.Plugins.Derivatives).
+        # Other plugins' data is available via EmAttachments.plugin_data/2 — no need
+        # to re-detect the type (the :mime plugin is declared before :derivatives above):
+        def handle(:derivatives, %{file: file} = ctx) do
+          case EmAttachments.plugin_data(ctx, :mime) do
+            %{type: "image/" <> _} ->
+              path = EmAttachments.SourceFile.local_path!(file)
+              {:ok, resized} = Operation.thumbnail(path, 80)
+              {:ok, small} = Image.write_to_buffer(resized, ".png")
+              %{small: small}
+
+            _ ->
+              :skip
+          end
         end
       end
 

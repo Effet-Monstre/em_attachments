@@ -82,6 +82,22 @@ defmodule EmAttachments.Plugins.DerivativesTest do
     def handle(_, _), do: :skip
   end
 
+  # Reads the :mime plugin's data via EmAttachments.plugin_data/2 and only
+  # generates a derivative for images.
+  defmodule UploaderUsingPluginData do
+    def handle(:derivatives, %{file: file} = ctx) do
+      case EmAttachments.plugin_data(ctx, :mime) do
+        %{type: "image/" <> _} ->
+          %{copy: File.read!(SourceFile.local_path!(file))}
+
+        _ ->
+          :skip
+      end
+    end
+
+    def handle(_, _), do: :skip
+  end
+
   # ---------------------------------------------------------------------------
   # Setup
   # ---------------------------------------------------------------------------
@@ -94,8 +110,8 @@ defmodule EmAttachments.Plugins.DerivativesTest do
     {:ok, backend: backend}
   end
 
-  defp upload_ctx(uploader, deps \\ %{}),
-    do: %{plugin_key: :derivatives, uploader: uploader, deps: deps, plugin_opts: []}
+  defp upload_ctx(uploader, plugins \\ %{}),
+    do: %{plugin_key: :derivatives, uploader: uploader, deps: %{}, plugins: plugins, plugin_opts: []}
 
   defp file_with_variants(variants) do
     %{
@@ -134,6 +150,22 @@ defmodule EmAttachments.Plugins.DerivativesTest do
 
       tf = TempFile.new(Fixtures.png_path(), "img.png")
       assert :skip = Derivatives.upload(tf, {mod, opts}, upload_ctx(SkipUploader))
+    end
+
+    test "handle/2 receives prior plugin data via ctx.plugins", %{backend: {mod, opts}} do
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+      plugins = %{mime: %{type: "image/png", extension: "png"}}
+
+      assert {:ok, %{variants: %{copy: %{id: _, storage: :store}}}} =
+               Derivatives.upload(tf, {mod, opts}, upload_ctx(UploaderUsingPluginData, plugins))
+    end
+
+    test "handle/2 can skip based on prior plugin data", %{backend: {mod, opts}} do
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+      plugins = %{mime: %{type: "application/pdf", extension: "pdf"}}
+
+      assert :skip =
+               Derivatives.upload(tf, {mod, opts}, upload_ctx(UploaderUsingPluginData, plugins))
     end
   end
 
