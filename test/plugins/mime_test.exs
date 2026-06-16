@@ -83,9 +83,9 @@ defmodule EmAttachments.Plugins.MimeTest do
       assert {:ok, %{type: "image/tiff", extension: "tiff"}} = cache_upload(tf)
     end
 
-    test "returns error for unknown type" do
+    test "returns nil type for unrecognized content" do
       tf = TempFile.new(Fixtures.txt_path(), "file.txt")
-      assert {:error, :unknown_mime_type} = cache_upload(tf)
+      assert {:ok, %{type: nil, extension: nil}} = cache_upload(tf)
     end
   end
 
