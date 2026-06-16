@@ -105,5 +105,6 @@ defmodule EmAttachments.Plugins.Mime do
   defp detect_bytes(<<0x49, 0x49, 0x2A, 0x00, _::binary>>), do: {:ok, {"image/tiff", "tiff"}}
   defp detect_bytes(<<0x4D, 0x4D, 0x00, 0x2A, _::binary>>), do: {:ok, {"image/tiff", "tiff"}}
 
-  defp detect_bytes(_), do: {:error, :unknown_mime_type}
+  # No magic bytes matched — leave type/extension unset rather than failing the upload.
+  defp detect_bytes(_), do: {:ok, {nil, nil}}
 end
