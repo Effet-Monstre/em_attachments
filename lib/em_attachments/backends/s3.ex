@@ -10,6 +10,7 @@ defmodule EmAttachments.Backends.S3 do
     - `:secret_access_key` — defaults to `AWS_SECRET_ACCESS_KEY` env var
     - `:acl` — `:private` (default) | `:public_read` | `:authenticated_read`
     - `:url_expires_in` — presigned URL TTL in seconds, defaults to 3600
+    - `:req_options` — options merged into each Req call
 
   ## Finalization / ACL promotion
 
@@ -55,7 +56,7 @@ defmodule EmAttachments.Backends.S3 do
     url = object_url(id, opts)
     headers = Signer.sign_request(:get, url, %{}, :unsigned, opts)
 
-    case Req.get(url, headers: headers) do
+    case Req.get(url, request_options(opts, headers: headers)) do
       {:ok, %{status: 200, body: body}} -> {:ok, body}
       {:ok, %{status: s, body: b}} -> {:error, {s, b}}
       {:error, reason} -> {:error, reason}
@@ -67,7 +68,7 @@ defmodule EmAttachments.Backends.S3 do
     url = object_url(id, opts)
     headers = Signer.sign_request(:delete, url, %{}, :unsigned, opts)
 
-    case Req.delete(url, headers: headers) do
+    case Req.delete(url, request_options(opts, headers: headers)) do
       {:ok, %{status: s}} when s in [200, 204] -> :ok
       {:ok, %{status: s, body: b}} -> {:error, {s, b}}
       {:error, reason} -> {:error, reason}
@@ -114,7 +115,7 @@ defmodule EmAttachments.Backends.S3 do
         url = "#{object_url(id, opts)}?acl="
         headers = Signer.sign_request(:put, url, acl_header(acl), "", opts)
 
-        case Req.put(url, headers: headers, body: "") do
+        case Req.put(url, request_options(opts, headers: headers, body: "")) do
           {:ok, %{status: s}} when s in 200..299 -> :ok
           {:ok, %{status: 404}} -> {:error, :not_found}
           {:ok, %{status: s, body: b}} -> {:error, {s, b}}
@@ -146,18 +147,20 @@ defmodule EmAttachments.Backends.S3 do
   defp do_put(id, source, opts) do
     url = object_url(id, opts)
 
-    case SourceFile.fetch_bytes(source) do
-      {:ok, body} ->
-        headers = Signer.sign_request(:put, url, acl_header(opts[:acl]), :unsigned, opts)
+    with {:ok, path} <- SourceFile.fetch_local_path(source),
+         {:ok, stat} <- File.stat(path) do
+      request_headers =
+        acl_header(opts[:acl])
+        |> Map.put("content-length", Integer.to_string(stat.size))
 
-        case Req.put(url, headers: headers, body: body) do
-          {:ok, %{status: s}} when s in 200..299 -> :ok
-          {:ok, %{status: s, body: b}} -> {:error, {s, b}}
-          {:error, reason} -> {:error, reason}
-        end
+      headers = Signer.sign_request(:put, url, request_headers, :unsigned, opts)
+      body = File.stream!(path, [], 64 * 1024)
 
-      {:error, _} = err ->
-        err
+      case Req.put(url, request_options(opts, headers: headers, body: body)) do
+        {:ok, %{status: s}} when s in 200..299 -> :ok
+        {:ok, %{status: s, body: b}} -> {:error, {s, b}}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -171,7 +174,7 @@ defmodule EmAttachments.Backends.S3 do
     # Sign with the empty-body hash (correct for CopyObject; body is zero bytes)
     headers = Signer.sign_request(:put, dest_url, copy_headers, "", dest_opts)
 
-    case Req.put(dest_url, headers: headers, body: "") do
+    case Req.put(dest_url, request_options(dest_opts, headers: headers, body: "")) do
       {:ok, %{status: s}} when s in 200..299 -> :ok
       {:ok, %{status: s, body: b}} -> {:error, {s, b}}
       {:error, reason} -> {:error, reason}
@@ -180,6 +183,10 @@ defmodule EmAttachments.Backends.S3 do
 
   defp same_bucket?(source_opts, dest_opts) do
     Keyword.fetch!(source_opts, :bucket) == Keyword.fetch!(dest_opts, :bucket)
+  end
+
+  defp request_options(opts, request_opts) do
+    Keyword.merge(opts[:req_options] || [], request_opts)
   end
 
   defp acl_header(nil), do: %{}

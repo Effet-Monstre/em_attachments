@@ -52,14 +52,15 @@ defprotocol EmAttachments.SourceFile do
   @doc """
   Returns the file content as a binary without necessarily writing to disk.
 
-  For `MemoryFile` this is a pure memory read — no I/O.
+  For `MemoryFile` this is a pure memory read until the source is materialized; afterward
+  it reads the managed local copy.
   For `TempFile` and `Plug.Upload` this reads the local file.
   For `BackendFile` this reads from the local cache if already downloaded,
   otherwise fetches from the backend directly (skipping the disk write that
   `local_path!/1` would perform).
 
-  Backends that send file content over a network (e.g. S3) should prefer this
-  over `local_path!/1` + `File.read` so that `MemoryFile` sources never touch disk.
+  This compatibility callback returns the complete file as a binary. Backends should
+  prefer `fetch_local_path/1` with a streaming request body for large uploads.
   """
   @spec fetch_bytes(t()) :: {:ok, binary()} | {:error, term()}
   def fetch_bytes(source)
@@ -72,4 +73,3 @@ defimpl EmAttachments.SourceFile, for: EmAttachments.TempFile do
   def filename(source), do: source.filename
   def size(source), do: source.size
 end
-

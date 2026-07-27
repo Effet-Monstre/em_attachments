@@ -57,9 +57,11 @@ defmodule EmAttachments.Plugins.Mime do
   defp detect(path) do
     case File.open(path, [:read, :binary]) do
       {:ok, file} ->
-        bytes = IO.binread(file, 16)
-        File.close(file)
-        detect_bytes(bytes)
+        try do
+          file |> IO.binread(16) |> detect_bytes()
+        after
+          File.close(file)
+        end
 
       {:error, reason} ->
         {:error, reason}

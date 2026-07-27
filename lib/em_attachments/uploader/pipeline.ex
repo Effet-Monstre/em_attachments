@@ -1,7 +1,7 @@
 defmodule EmAttachments.Uploader.Pipeline do
   @moduledoc false
 
-  alias EmAttachments.{BackendFile, Config, SourceFile, TempFile, Util}
+  alias EmAttachments.{BackendFile, Config, MemoryFile, SourceFile, TempFile, Util}
   alias EmAttachments.Uploader.Topo
 
   # ---------------------------------------------------------------------------
@@ -9,38 +9,158 @@ defmodule EmAttachments.Uploader.Pipeline do
   # ---------------------------------------------------------------------------
 
   def upload(uploader, input, call_opts \\ []) do
-    with {:ok, source} <- to_source_file(input),
-         ordered <- Topo.resolve_order!(uploader.__uploader_plugins__()),
-         {store_mod, store_opts} = Config.store(uploader.__uploader_opts__()),
-         {:ok, plugin_results} <-
-           run_plugins(source, uploader, ordered, call_opts, {store_mod, store_opts}, %{}),
-         :ok <-
-           run_validations(source, uploader.__validations__(), ordered, plugin_results, call_opts),
-         :ok <- run_custom_validate(source, plugin_results, uploader) do
-      id = Util.random_id()
-
-      file =
-        struct(uploader, %{
-          id: id,
-          storage: :store,
-          metadata: %{
-            size: SourceFile.size(source),
-            filename: SourceFile.filename(source),
-            plugins: plugin_results
-          },
-          uploader: to_string(uploader)
-        })
-
-      case store_mod.put(id, source, store_opts) do
-        :ok ->
-          maybe_insert_pending(uploader, id, file)
-          {:ok, file}
-
-        {:error, reason} ->
-          {:error, reason}
+    with {:ok, source} <- to_source_file(input) do
+      try do
+        do_upload(uploader, source, call_opts)
+      after
+        cleanup_source(source)
       end
     end
   end
+
+  defp do_upload(uploader, source, call_opts) do
+    ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
+    backend = Config.store(uploader.__uploader_opts__())
+    results_key = {__MODULE__, make_ref()}
+    Process.put(results_key, %{})
+
+    try do
+      case run_plugins(source, uploader, ordered, call_opts, backend, %{}, results_key) do
+        {:ok, plugin_results} ->
+          finish_upload(
+            source,
+            uploader,
+            ordered,
+            call_opts,
+            backend,
+            plugin_results
+          )
+
+        {:error, reason} ->
+          rollback_plugin_assets(uploader, ordered, Process.get(results_key, %{}), backend)
+          {:error, reason}
+      end
+    rescue
+      exception ->
+        rollback_plugin_assets(uploader, ordered, Process.get(results_key, %{}), backend)
+        reraise exception, __STACKTRACE__
+    after
+      Process.delete(results_key)
+    end
+  end
+
+  defp finish_upload(
+         source,
+         uploader,
+         ordered,
+         call_opts,
+         {store_mod, store_opts} = backend,
+         plugin_results
+       ) do
+    validation_result =
+      with :ok <-
+             run_validations(
+               source,
+               uploader.__validations__(),
+               ordered,
+               plugin_results,
+               call_opts
+             ),
+           :ok <- run_custom_validate(source, plugin_results, uploader) do
+        :ok
+      end
+
+    case validation_result do
+      :ok ->
+        id = Util.random_id()
+
+        file =
+          struct(uploader, %{
+            id: id,
+            storage: :store,
+            metadata: %{
+              size: SourceFile.size(source),
+              filename: SourceFile.filename(source),
+              plugins: plugin_results
+            },
+            uploader: to_string(uploader)
+          })
+
+        put_result =
+          try do
+            store_mod.put(id, source, store_opts)
+          rescue
+            exception ->
+              safe_delete(store_mod, id, store_opts)
+              reraise exception, __STACKTRACE__
+          catch
+            kind, reason ->
+              safe_delete(store_mod, id, store_opts)
+              :erlang.raise(kind, reason, __STACKTRACE__)
+          end
+
+        case put_result do
+          :ok ->
+            try do
+              maybe_insert_pending(uploader, id, file)
+              {:ok, file}
+            rescue
+              exception ->
+                safe_delete(store_mod, id, store_opts)
+                reraise exception, __STACKTRACE__
+            end
+
+          {:error, reason} ->
+            safe_delete(store_mod, id, store_opts)
+            rollback_plugin_assets(uploader, ordered, plugin_results, backend)
+            {:error, reason}
+        end
+
+      {:error, _} = error ->
+        rollback_plugin_assets(uploader, ordered, plugin_results, backend)
+        error
+    end
+  end
+
+  defp rollback_plugin_assets(uploader, ordered, plugin_results, {backend_mod, backend_opts}) do
+    file =
+      struct(uploader, %{
+        storage: :store,
+        metadata: %{plugins: plugin_results},
+        uploader: to_string(uploader)
+      })
+
+    ordered
+    |> Enum.flat_map(fn {key, mod, plugin_opts} ->
+      if function_exported?(mod, :asset_ids, 2) do
+        try do
+          mod.asset_ids(file, %{plugin_key: key, plugin_opts: plugin_opts})
+        rescue
+          _ -> []
+        catch
+          _, _ -> []
+        end
+      else
+        []
+      end
+    end)
+    |> Enum.uniq()
+    |> Enum.each(&safe_delete(backend_mod, &1, backend_opts))
+  end
+
+  defp safe_delete(backend_mod, id, backend_opts) do
+    try do
+      backend_mod.delete(id, backend_opts)
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+  end
+
+  defp cleanup_source(%MemoryFile{} = source), do: MemoryFile.cleanup(source)
+  defp cleanup_source(%BackendFile{} = source), do: BackendFile.cleanup(source)
+  defp cleanup_source(%TempFile{} = source), do: TempFile.cleanup(source)
 
   def delete(uploader, file) do
     {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
@@ -242,7 +362,15 @@ defmodule EmAttachments.Uploader.Pipeline do
     end
   end
 
-  defp run_plugins(source, uploader, ordered_plugins, call_opts, backend_context, initial_results) do
+  defp run_plugins(
+         source,
+         uploader,
+         ordered_plugins,
+         call_opts,
+         backend_context,
+         initial_results,
+         results_key
+       ) do
     Enum.reduce_while(ordered_plugins, {:ok, initial_results}, fn {key, mod, compile_opts},
                                                                   {:ok, results} ->
       plugin_opts = merge_plugin_opts(compile_opts, call_opts, key)
@@ -298,8 +426,13 @@ defmodule EmAttachments.Uploader.Pipeline do
                 end
 
               case final do
-                {:ok, f} -> {:cont, {:ok, Map.put(results, key, f)}}
-                :skip -> {:cont, {:ok, results}}
+                {:ok, f} ->
+                  updated = Map.put(results, key, f)
+                  Process.put(results_key, updated)
+                  {:cont, {:ok, updated}}
+
+                :skip ->
+                  {:cont, {:ok, results}}
               end
           end
       end

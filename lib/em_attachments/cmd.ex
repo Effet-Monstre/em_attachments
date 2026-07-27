@@ -1,3 +1,19 @@
+defmodule EmAttachments.Cmd.Discard do
+  @moduledoc false
+  defstruct []
+end
+
+defimpl Collectable, for: EmAttachments.Cmd.Discard do
+  def into(sink) do
+    {sink,
+     fn
+       acc, {:cont, _chunk} -> acc
+       acc, :done -> acc
+       _acc, :halt -> :ok
+     end}
+  end
+end
+
 defmodule EmAttachments.Cmd do
   @moduledoc """
   Helpers for invoking CLI tools as derivative processors.
@@ -54,10 +70,13 @@ defmodule EmAttachments.Cmd do
     resolved = expand_args(args, input_path, output_path)
 
     try do
-      case System.cmd(cmd, resolved, stderr_to_stdout: false) do
+      case System.cmd(cmd, resolved,
+             stderr_to_stdout: false,
+             into: %EmAttachments.Cmd.Discard{}
+           ) do
         {_, 0} ->
           if File.exists?(output_path) do
-            {:ok, TempFile.new(output_path, "derivative")}
+            {:ok, TempFile.managed(output_path, "derivative")}
           else
             {:error, :no_output}
           end
@@ -67,7 +86,9 @@ defmodule EmAttachments.Cmd do
           {:error, :non_zero_exit}
       end
     rescue
-      ErlangError -> {:error, :command_not_found}
+      ErlangError ->
+        File.rm(output_path)
+        {:error, :command_not_found}
     end
   end
 
@@ -81,12 +102,13 @@ defmodule EmAttachments.Cmd do
   end
 
   @doc """
-  Runs `cmd` with `args`, capturing stdout as an in-memory `MemoryFile`.
+  Runs `cmd` with `args`, streaming stdout into a managed, disk-backed `MemoryFile`.
 
   Only `:input` is substituted in `args`; there is no `:output` — the tool is
   expected to write its result to stdout (e.g. `pdftotext input.pdf -`).
 
-  Returns `{:ok, MemoryFile.t()}` on success.
+  Returns `{:ok, MemoryFile.t()}` on success. The upload pipeline or derivatives plugin
+  removes the backing file automatically; direct callers must call `MemoryFile.cleanup/1`.
 
   Errors:
     - `{:error, :command_not_found}` — executable not on PATH
@@ -97,14 +119,24 @@ defmodule EmAttachments.Cmd do
   def run_stdout(cmd, args, input_path, opts \\ []) do
     filename = Keyword.get(opts, :filename, "derivative")
     resolved = expand_args(args, input_path, nil)
+    output_path = Path.join(System.tmp_dir!(), "em_attach_stdout_#{Util.random_id(8)}")
 
     try do
-      case System.cmd(cmd, resolved, stderr_to_stdout: false) do
-        {stdout, 0} -> {:ok, MemoryFile.new(stdout, filename)}
-        {_, _} -> {:error, :non_zero_exit}
+      case System.cmd(cmd, resolved,
+             stderr_to_stdout: false,
+             into: File.stream!(output_path)
+           ) do
+        {_, 0} ->
+          {:ok, MemoryFile.from_path(output_path, filename)}
+
+        {_, _} ->
+          File.rm(output_path)
+          {:error, :non_zero_exit}
       end
     rescue
-      ErlangError -> {:error, :command_not_found}
+      ErlangError ->
+        File.rm(output_path)
+        {:error, :command_not_found}
     end
   end
 
