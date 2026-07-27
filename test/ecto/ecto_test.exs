@@ -320,6 +320,31 @@ defmodule EmAttachments.EctoTest do
     end
   end
 
+  # Unrecognized content is no longer a hard failure: with no MIME type restriction,
+  # the file is stored with type/extension nil and persists through the Repo round-trip.
+  @tag :db
+  @tag :local_backend
+  test "unrecognized file type persists with nil mime type" do
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    original_config = EmAttachments.Config.all()
+    Application.put_env(:em_attachments, :config, Keyword.put(original_config, :repo, Repo))
+    on_exit(fn -> Application.put_env(:em_attachments, :config, original_config) end)
+
+    upload = %Plug.Upload{path: Fixtures.txt_path(), filename: "notes.txt", content_type: "text/plain"}
+
+    {:ok, user} =
+      DerivativeDbRecord.changeset(%{"name" => unique_name(), "avatar" => upload})
+      |> cast_attachments([:avatar])
+      |> Repo.insert()
+
+    assert user.avatar.metadata.plugins.mime.type == nil
+    assert user.avatar.metadata.plugins.mime.extension == nil
+
+    reloaded = Repo.get!(DerivativeDbRecord, user.id)
+    assert reloaded.avatar.metadata.plugins.mime.type == nil
+    assert reloaded.avatar.metadata.plugins.mime.extension == nil
+  end
+
   test "unknown map param returns error" do
     {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "avatar.png"})
     record = %UserRecord{id: Ecto.UUID.generate(), avatar: file}

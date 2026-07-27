@@ -1,20 +1,21 @@
 defmodule EmAttachments.BackendFile do
   @moduledoc """
-  Lazy, cache-once file reference backed by a storage backend.
+    Lazy, cache-once file reference backed by a storage backend.
 
-  The file is not fetched until `EmAttachments.SourceFile.local_path!/1` is first
-  called. After the initial download the local tmp path is cached in the Agent, so
-  every subsequent call to `local_path!/1` is free. Call `cleanup/1` when the file
-  is no longer needed to stop the Agent and remove the tmp file.
+    The file is not fetched until `EmAttachments.SourceFile.local_path!/1` is first
+    called. After the initial download the local tmp path is cached in the Agent, so
+    every subsequent call to `local_path!/1` is free. Call `cleanup/1` when the file
+    is no longer needed to stop the Agent and remove the tmp file. Upload pipelines
+    consume and clean `BackendFile` sources automatically.
 
-  ## Usage
+    ## Usage
 
-      source = BackendFile.new(MyBackend, backend_opts, id, "photo.jpg", 204_800)
-      path   = EmAttachments.SourceFile.local_path!(source)   # downloads once
-      _path  = EmAttachments.SourceFile.local_path!(source)   # cached, no download
-      BackendFile.cleanup(source)
+        source = BackendFile.new(MyBackend, backend_opts, id, "photo.jpg", 204_800)
+        path   = EmAttachments.SourceFile.local_path!(source)   # downloads once
+        _path  = EmAttachments.SourceFile.local_path!(source)   # cached, no download
+        BackendFile.cleanup(source)
 
-"""
+  """
 
   use Agent
 
@@ -54,19 +55,50 @@ defmodule EmAttachments.BackendFile do
   """
   @spec ensure_local(t()) :: {:ok, String.t()} | {:error, term()}
   def ensure_local(%__MODULE__{pid: pid}) do
-    Agent.get_and_update(pid, fn
-      %{local_path: nil, backend_mod: mod, backend_opts: opts, id: id} = state ->
-        case mod.get(id, opts) do
-          {:ok, content} ->
-            tmp = tmp_path()
-            File.write!(tmp, content)
-            {{:ok, tmp}, %{state | local_path: tmp}}
+    case Agent.get(pid, & &1) do
+      %{local_path: path} when is_binary(path) ->
+        {:ok, path}
 
-          {:error, _} = err ->
-            {err, state}
+      %{backend_mod: mod, backend_opts: opts, id: id} ->
+        download_and_cache(pid, mod, opts, id)
+    end
+  end
+
+  defp download_and_cache(pid, mod, opts, id) do
+    tmp = tmp_path()
+
+    try do
+      result =
+        with {:ok, content} <- mod.get(id, opts) do
+          File.write(tmp, content)
         end
 
+      case result do
+        :ok ->
+          cache_download(pid, tmp)
+
+        {:error, _} = err ->
+          File.rm(tmp)
+          err
+      end
+    rescue
+      exception ->
+        File.rm(tmp)
+        reraise exception, __STACKTRACE__
+    catch
+      kind, reason ->
+        File.rm(tmp)
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  defp cache_download(pid, tmp) do
+    Agent.get_and_update(pid, fn
+      %{local_path: nil} = state ->
+        {{:ok, tmp}, %{state | local_path: tmp}}
+
       %{local_path: path} = state ->
+        File.rm(tmp)
         {{:ok, path}, state}
     end)
   end
@@ -78,10 +110,32 @@ defmodule EmAttachments.BackendFile do
   @doc "Stops the Agent and deletes any downloaded tmp file."
   @spec cleanup(t()) :: :ok
   def cleanup(%__MODULE__{pid: pid}) do
-    %{local_path: path} = Agent.get(pid, & &1)
-    if path, do: File.rm(path)
-    Agent.stop(pid)
+    case safe_state(pid) do
+      %{local_path: path} ->
+        if path, do: File.rm(path)
+        safe_stop(pid)
+
+      nil ->
+        :ok
+    end
+
     :ok
+  end
+
+  defp safe_state(pid) do
+    try do
+      Agent.get(pid, & &1)
+    catch
+      :exit, _ -> nil
+    end
+  end
+
+  defp safe_stop(pid) do
+    try do
+      Agent.stop(pid)
+    catch
+      :exit, _ -> :ok
+    end
   end
 
   defp tmp_path do

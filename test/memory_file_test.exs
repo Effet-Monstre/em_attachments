@@ -26,6 +26,18 @@ defmodule EmAttachments.MemoryFileTest do
     MemoryFile.cleanup(mf)
   end
 
+  test "materializing releases the in-memory binary while preserving metadata and bytes" do
+    mf = MemoryFile.new("content", "test.txt")
+    path = SourceFile.local_path!(mf)
+
+    assert %{data: nil, size: 7, local_path: ^path} = MemoryFile.state(mf)
+    assert SourceFile.size(mf) == 7
+    assert SourceFile.filename(mf) == "test.txt"
+    assert SourceFile.fetch_bytes(mf) == {:ok, "content"}
+
+    MemoryFile.cleanup(mf)
+  end
+
   test "local_path!/1 returns the same path on subsequent calls" do
     mf = MemoryFile.new("content", "test.txt")
     path1 = SourceFile.local_path!(mf)

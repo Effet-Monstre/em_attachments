@@ -34,6 +34,10 @@ defmodule EmAttachments.Plugins.Derivatives do
     - A path string — used as-is
 
   Derivatives may be nested: `%{thumb: %{small: bin, large: bin}}`
+
+  Plugin options:
+    - `:max_concurrency` — maximum simultaneous backend uploads (default: 2)
+    - `:timeout` — per-upload task timeout (default: `:infinity`)
   """
 
   use EmAttachments.Plugin
@@ -49,7 +53,7 @@ defmodule EmAttachments.Plugins.Derivatives do
     else
       case ctx.uploader.handle(ctx.plugin_key, %{file: source, plugins: ctx.plugins}) do
         map when is_map(map) ->
-          case upload_derivatives(map, backend_mod, backend_opts, source) do
+          case upload_derivatives(map, backend_mod, backend_opts, source, ctx.plugin_opts) do
             {:ok, uploaded} -> {:ok, %{variants: uploaded}}
             {:error, _} = err -> err
           end
@@ -142,38 +146,89 @@ defmodule EmAttachments.Plugins.Derivatives do
   # ---------------------------------------------------------------------------
 
   # Uploads a map of handler outputs in parallel.
-  # resolve_cmds expands {:cmd,...}/{:cmd_stdout,...} tuples using the source file.
-  # build_pending converts binaries to TempFiles; nested maps are recursed.
+  # prepare_pending expands commands and immediately materializes binaries to managed files.
   # All leaf TempFiles/MemoryFiles are collected flat, uploaded concurrently, then
   # the original tree shape is reconstructed from the results.
-  defp upload_derivatives(map, backend_mod, backend_opts, source) when is_map(map) do
-    resolved = resolve_cmds(map, source)
-    pending = build_pending(resolved)
+  defp upload_derivatives(map, backend_mod, backend_opts, source, plugin_opts)
+       when is_map(map) do
+    pending = prepare_pending(map, source)
     flat = collect_items(pending)
+    max_concurrency = Keyword.get(plugin_opts, :max_concurrency, 2)
+    timeout = Keyword.get(plugin_opts, :timeout, :infinity)
 
-    flat
-    |> Task.async_stream(
-      fn {key_path, item} ->
-        id = Util.random_id(8)
-        result = backend_mod.put(id, item, backend_opts)
-        if result == :ok, do: cleanup_source(item)
-        {key_path, id, result}
-      end,
-      ordered: true
-    )
-    |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {key_path, id, :ok}}, {:ok, acc} ->
-        {:cont, {:ok, [{key_path, %{id: id, storage: :store}} | acc]}}
+    try do
+      {uploaded, error} =
+        flat
+        |> Task.async_stream(
+          fn {key_path, item} -> upload_item(key_path, item, backend_mod, backend_opts) end,
+          ordered: false,
+          max_concurrency: max_concurrency,
+          timeout: timeout
+        )
+        |> Enum.reduce({[], nil}, fn
+          {:ok, {:ok, key_path, id}}, {uploaded, error} ->
+            {[{key_path, %{id: id, storage: :store}} | uploaded], error}
 
-      {:ok, {_, _, {:error, _} = err}}, _ ->
-        {:halt, err}
+          {:ok, {:error, reason}}, {uploaded, nil} ->
+            {uploaded, reason}
 
-      {:exit, reason}, _ ->
-        {:halt, {:error, {:task_exit, reason}}}
+          {:ok, {:error, _reason}}, acc ->
+            acc
+
+          {:exit, reason}, {uploaded, nil} ->
+            {uploaded, {:task_exit, reason}}
+
+          {:exit, _reason}, acc ->
+            acc
+        end)
+
+      if error do
+        rollback_uploaded(uploaded, backend_mod, backend_opts)
+        {:error, error}
+      else
+        {:ok, reconstruct_tree(Enum.reverse(uploaded))}
+      end
+    after
+      Enum.each(flat, fn {_key_path, item} -> cleanup_source(item) end)
+    end
+  end
+
+  defp upload_item(key_path, item, backend_mod, backend_opts) do
+    id = Util.random_id(8)
+
+    try do
+      case backend_mod.put(id, item, backend_opts) do
+        :ok ->
+          {:ok, key_path, id}
+
+        {:error, reason} ->
+          safe_delete(backend_mod, id, backend_opts)
+          {:error, reason}
+      end
+    rescue
+      exception ->
+        safe_delete(backend_mod, id, backend_opts)
+        {:error, {:task_exit, {exception, __STACKTRACE__}}}
+    catch
+      kind, reason ->
+        safe_delete(backend_mod, id, backend_opts)
+        {:error, {:task_exit, {kind, reason}}}
+    end
+  end
+
+  defp rollback_uploaded(uploaded, backend_mod, backend_opts) do
+    Enum.each(uploaded, fn {_path, %{id: id}} ->
+      safe_delete(backend_mod, id, backend_opts)
     end)
-    |> case do
-      {:ok, results} -> {:ok, reconstruct_tree(Enum.reverse(results))}
-      err -> err
+  end
+
+  defp safe_delete(backend_mod, id, backend_opts) do
+    try do
+      backend_mod.delete(id, backend_opts)
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
     end
   end
 
@@ -201,46 +256,59 @@ defmodule EmAttachments.Plugins.Derivatives do
     Map.update(map, key, put_in_path(%{}, rest, value), &put_in_path(&1, rest, value))
   end
 
-  defp build_pending(map) when is_map(map) do
-    Map.new(map, fn {k, v} -> {k, build_item(v)} end)
+  defp prepare_pending(map, source) when is_map(map) do
+    Enum.reduce(map, %{}, fn {key, value}, acc ->
+      try do
+        Map.put(acc, key, prepare_item(value, source))
+      rescue
+        exception ->
+          cleanup_resolved(acc)
+          reraise exception, __STACKTRACE__
+      end
+    end)
   end
 
-  defp build_item(%TempFile{} = tf), do: tf
-  defp build_item(%MemoryFile{} = mf), do: mf
+  defp prepare_item({:cmd, cmd, args}, source),
+    do: prepare_item({:cmd, cmd, args, []}, source)
 
-  defp build_item(content) when is_binary(content) do
+  defp prepare_item({:cmd, cmd, args, opts}, source),
+    do: Cmd.run!(cmd, args, SourceFile.local_path!(source), opts)
+
+  defp prepare_item({:cmd_stdout, cmd, args}, source),
+    do: prepare_item({:cmd_stdout, cmd, args, []}, source)
+
+  defp prepare_item({:cmd_stdout, cmd, args, opts}, source),
+    do: Cmd.run_stdout!(cmd, args, SourceFile.local_path!(source), opts)
+
+  defp prepare_item(%TempFile{} = tf, _source), do: tf
+  defp prepare_item(%MemoryFile{} = mf, _source), do: mf
+
+  defp prepare_item(content, _source) when is_binary(content) do
     path = Path.join(System.tmp_dir!(), "em_attach_#{Util.random_id(8)}")
-    File.write!(path, content)
-    TempFile.new(path, "derivative")
+
+    try do
+      File.write!(path, content)
+      TempFile.managed(path, "derivative")
+    rescue
+      exception ->
+        File.rm(path)
+        reraise exception, __STACKTRACE__
+    end
   end
 
-  defp build_item(map) when is_map(map), do: build_pending(map)
-
-  defp resolve_cmds(map, source) when is_map(map) do
-    Map.new(map, fn {k, v} -> {k, resolve_cmd_item(v, source)} end)
-  end
-
-  defp resolve_cmd_item({:cmd, cmd, args}, source),
-    do: resolve_cmd_item({:cmd, cmd, args, []}, source)
-
-  defp resolve_cmd_item({:cmd, cmd, args, opts}, source) do
-    Cmd.run!(cmd, args, SourceFile.local_path!(source), opts)
-  end
-
-  defp resolve_cmd_item({:cmd_stdout, cmd, args}, source),
-    do: resolve_cmd_item({:cmd_stdout, cmd, args, []}, source)
-
-  defp resolve_cmd_item({:cmd_stdout, cmd, args, opts}, source) do
-    Cmd.run_stdout!(cmd, args, SourceFile.local_path!(source), opts)
-  end
-
-  defp resolve_cmd_item(%TempFile{} = tf, _source), do: tf
-  defp resolve_cmd_item(%MemoryFile{} = mf, _source), do: mf
-  defp resolve_cmd_item(map, source) when is_map(map), do: resolve_cmds(map, source)
-  defp resolve_cmd_item(other, _source), do: other
+  defp prepare_item(map, source) when is_map(map), do: prepare_pending(map, source)
 
   defp cleanup_source(%TempFile{path: path}), do: File.rm(path)
   defp cleanup_source(%MemoryFile{} = mf), do: MemoryFile.cleanup(mf)
+
+  defp cleanup_resolved(%TempFile{} = source), do: cleanup_source(source)
+  defp cleanup_resolved(%MemoryFile{} = source), do: cleanup_source(source)
+
+  defp cleanup_resolved(map) when is_map(map) do
+    Enum.each(map, fn {_key, value} -> cleanup_resolved(value) end)
+  end
+
+  defp cleanup_resolved(_other), do: :ok
 
   defp collect_ids(map) when is_map(map) do
     Enum.flat_map(map, fn {_k, v} ->

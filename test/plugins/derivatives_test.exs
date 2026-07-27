@@ -52,7 +52,78 @@ defmodule EmAttachments.Plugins.DerivativesTest do
   defmodule UploaderWithMemoryFileDerivative do
     def handle(:derivatives, %{file: file}) do
       data = File.read!(SourceFile.local_path!(file))
-      %{processed: MemoryFile.new(data, "processed")}
+      source = MemoryFile.new(data, "processed")
+      send(self(), {:memory_derivative, source})
+      %{processed: source}
+    end
+
+    def handle(_, _), do: :skip
+  end
+
+  defmodule ErrorBackend do
+    def put(_id, source, opts) do
+      path = SourceFile.local_path!(source)
+      send(opts[:test_pid], {:failed_derivative, source, path})
+      {:error, :store_failed}
+    end
+  end
+
+  defmodule RaisingBackend do
+    def put(_id, source, opts) do
+      path = SourceFile.local_path!(source)
+      send(opts[:test_pid], {:raised_derivative, source, path})
+      raise "store crashed"
+    end
+  end
+
+  defmodule PartialFailureBackend do
+    def put(id, source, opts) do
+      _ = SourceFile.local_path!(source)
+      send(opts[:test_pid], {:attempted, id})
+
+      Agent.get_and_update(opts[:counter], fn
+        0 -> {:ok, 1}
+        count -> {{:error, :store_failed}, count + 1}
+      end)
+    end
+
+    def delete(id, opts) do
+      send(opts[:test_pid], {:rolled_back, id})
+      :ok
+    end
+  end
+
+  defmodule TwoMemoryDerivatives do
+    def handle(:derivatives, %{file: file}) do
+      data = File.read!(SourceFile.local_path!(file))
+      %{first: MemoryFile.new(data, "first"), second: MemoryFile.new(data, "second")}
+    end
+
+    def handle(_, _), do: :skip
+  end
+
+  defmodule ConcurrencyBackend do
+    def put(_id, source, opts) do
+      _ = SourceFile.local_path!(source)
+
+      Agent.update(opts[:tracker], fn state ->
+        active = state.active + 1
+        %{state | active: active, max: max(state.max, active)}
+      end)
+
+      Process.sleep(20)
+      Agent.update(opts[:tracker], &%{&1 | active: &1.active - 1})
+      :ok
+    end
+  end
+
+  defmodule FourMemoryDerivatives do
+    def handle(:derivatives, %{file: file}) do
+      data = File.read!(SourceFile.local_path!(file))
+
+      Map.new(1..4, fn index ->
+        {index, MemoryFile.new(data, "variant-#{index}")}
+      end)
     end
 
     def handle(_, _), do: :skip
@@ -111,7 +182,13 @@ defmodule EmAttachments.Plugins.DerivativesTest do
   end
 
   defp upload_ctx(uploader, plugins \\ %{}),
-    do: %{plugin_key: :derivatives, uploader: uploader, deps: %{}, plugins: plugins, plugin_opts: []}
+    do: %{
+      plugin_key: :derivatives,
+      uploader: uploader,
+      deps: %{},
+      plugins: plugins,
+      plugin_opts: []
+    }
 
   defp file_with_variants(variants) do
     %{
@@ -188,7 +265,11 @@ defmodule EmAttachments.Plugins.DerivativesTest do
       }
 
       assert :ok =
-               Derivatives.destroy(file, %{plugin_key: :derivatives, plugin_opts: [], backend: backend})
+               Derivatives.destroy(file, %{
+                 plugin_key: :derivatives,
+                 plugin_opts: [],
+                 backend: backend
+               })
 
       for {_key, %{id: id}} <- data.variants do
         refute File.exists?(Path.join(opts[:fs_path], id))
@@ -248,7 +329,14 @@ defmodule EmAttachments.Plugins.DerivativesTest do
 
       assert :ok = Derivatives.after_confirm(file, ctx)
 
-      ids = for _ <- 1..2, do: (assert_receive({:finalize, id, _}); id)
+      ids =
+        for _ <- 1..2,
+            do:
+              (
+                assert_receive({:finalize, id, _})
+                id
+              )
+
       assert Enum.sort(ids) == ["nested-large", "nested-small"]
     end
 
@@ -372,6 +460,88 @@ defmodule EmAttachments.Plugins.DerivativesTest do
 
       assert {:ok, %{variants: %{processed: %{id: _, storage: :store}}}} =
                Derivatives.upload(tf, {mod, opts}, upload_ctx(UploaderWithMemoryFileDerivative))
+
+      assert_receive {:memory_derivative, source}
+      refute Process.alive?(source.pid)
+    end
+
+    test "cleans derivative sources when the backend returns an error" do
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+
+      assert {:error, :store_failed} =
+               Derivatives.upload(
+                 tf,
+                 {ErrorBackend, [test_pid: self()]},
+                 upload_ctx(UploaderWithMemoryFileDerivative)
+               )
+
+      assert_receive {:failed_derivative, source, path}
+      refute Process.alive?(source.pid)
+      refute File.exists?(path)
+    end
+
+    test "rolls back variants that succeeded when another variant fails" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+
+      assert {:error, :store_failed} =
+               Derivatives.upload(
+                 tf,
+                 {PartialFailureBackend, [counter: counter, test_pid: self()]},
+                 upload_ctx(TwoMemoryDerivatives)
+               )
+
+      attempted =
+        for _ <- 1..2,
+            do:
+              (
+                assert_receive({:attempted, id})
+                id
+              )
+
+      rolled_back =
+        for _ <- 1..2,
+            do:
+              (
+                assert_receive({:rolled_back, id})
+                id
+              )
+
+      assert Enum.sort(rolled_back) == Enum.sort(attempted)
+      Agent.stop(counter)
+    end
+
+    test "bounds concurrent derivative uploads to the configured limit" do
+      {:ok, tracker} = Agent.start_link(fn -> %{active: 0, max: 0} end)
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+      ctx = %{upload_ctx(FourMemoryDerivatives) | plugin_opts: [max_concurrency: 2]}
+
+      assert {:ok, %{variants: variants}} =
+               Derivatives.upload(tf, {ConcurrencyBackend, [tracker: tracker]}, ctx)
+
+      assert map_size(variants) == 4
+      assert Agent.get(tracker, & &1.max) == 2
+      Agent.stop(tracker)
+    end
+
+    test "cleans derivative sources when an upload task exits" do
+      tf = TempFile.new(Fixtures.png_path(), "img.png")
+      previous_flag = Process.flag(:trap_exit, true)
+
+      try do
+        assert {:error, {:task_exit, {%RuntimeError{message: "store crashed"}, _stack}}} =
+                 Derivatives.upload(
+                   tf,
+                   {RaisingBackend, [test_pid: self()]},
+                   upload_ctx(UploaderWithMemoryFileDerivative)
+                 )
+
+        assert_receive {:raised_derivative, source, path}
+        refute Process.alive?(source.pid)
+        refute File.exists?(path)
+      after
+        Process.flag(:trap_exit, previous_flag)
+      end
     end
 
     test "{:cmd, ...} tuple auto-executes with input path supplied", %{backend: {mod, opts}} do
