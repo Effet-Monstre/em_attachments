@@ -103,16 +103,6 @@ defmodule EmAttachments.Config do
     end
   end
 
-  def secret_key! do
-    case all()[:secret_key] do
-      nil ->
-        raise "EmAttachments: :secret_key is not configured under config :em_attachments, :config"
-
-      key ->
-        resolve_value(key)
-    end
-  end
-
   @doc """
   Resolves a config value, expanding `{:env, "VAR_NAME"}` tuples via `System.get_env/1`.
 

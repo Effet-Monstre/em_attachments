@@ -48,6 +48,11 @@ Detects the real MIME type from magic bytes — not from the file extension or b
 
 **Supported types:** PNG, JPEG, GIF, WebP, PDF, ZIP, MP3, MP4/MOV, BMP, TIFF.
 
+Declaring this plugin is what gives you MIME *validation* and a `mime` entry in
+`file.metadata.plugins`. Detection itself always runs — the asset's extension and the
+`Content-Type` sent to the storage backend are derived from the bytes even when the plugin
+is absent. `EmAttachments.Mime.detect/1` exposes the same detection directly.
+
 **Validation options**
 
 ```elixir
