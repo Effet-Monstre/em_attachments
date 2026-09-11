@@ -6,7 +6,6 @@ Add to `config/config.exs`:
 
 ```elixir
 config :em_attachments,
-  secret_key: "long-random-secret",   # required — used to sign file IDs
   config: [
     store: {EmAttachments.Backends.S3, bucket: "my-bucket", acl: :public_read}
   ]
@@ -16,21 +15,10 @@ For local development use `EmAttachments.Backends.Local`:
 
 ```elixir
 config :em_attachments,
-  secret_key: "dev-secret",
   config: [
     store: {EmAttachments.Backends.Local, fs_path: "/var/app/store", render_path: "/files/store"}
   ]
 ```
-
-### `secret_key`
-
-Required. Used to HMAC-sign file IDs to prevent enumeration. Generate one with:
-
-```bash
-mix phx.gen.secret
-```
-
-Or any 64-character random string.
 
 ### `repo`
 

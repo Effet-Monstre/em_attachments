@@ -151,6 +151,7 @@ defmodule EmAttachments.Backends.S3 do
          {:ok, stat} <- File.stat(path) do
       request_headers =
         acl_header(opts[:acl])
+        |> Map.merge(content_headers(opts))
         |> Map.put("content-length", Integer.to_string(stat.size))
 
       headers = Signer.sign_request(:put, url, request_headers, :unsigned, opts)
@@ -170,7 +171,13 @@ defmodule EmAttachments.Backends.S3 do
     source_bucket = Keyword.fetch!(source_opts, :bucket)
     source_prefix = source_opts[:prefix] || "uploads"
     copy_source = "/#{source_bucket}/#{source_prefix}/#{source_id}"
-    copy_headers = acl_header(dest_opts[:acl]) |> Map.put("x-amz-copy-source", copy_source)
+
+    copy_headers =
+      acl_header(dest_opts[:acl])
+      |> Map.merge(content_headers(dest_opts))
+      |> Map.put("x-amz-copy-source", copy_source)
+      |> Map.put("x-amz-metadata-directive", "REPLACE")
+
     # Sign with the empty-body hash (correct for CopyObject; body is zero bytes)
     headers = Signer.sign_request(:put, dest_url, copy_headers, "", dest_opts)
 
@@ -187,6 +194,26 @@ defmodule EmAttachments.Backends.S3 do
 
   defp request_options(opts, request_opts) do
     Keyword.merge(opts[:req_options] || [], request_opts)
+  end
+
+  defp content_headers(opts) do
+    %{}
+    |> put_header("content-type", opts[:content_type])
+    |> put_header("content-disposition", disposition(opts[:content_disposition], opts[:filename]))
+  end
+
+  defp put_header(headers, _name, nil), do: headers
+  defp put_header(headers, name, value), do: Map.put(headers, name, value)
+
+  defp disposition(nil, _filename), do: nil
+  defp disposition(mode, nil), do: to_string(mode)
+
+  defp disposition(mode, filename) do
+    ~s(#{mode}; filename="#{sanitize_filename(filename)}")
+  end
+
+  defp sanitize_filename(filename) do
+    String.replace(filename, ~r/["\\\x00-\x1f\x7f]/, "")
   end
 
   defp acl_header(nil), do: %{}

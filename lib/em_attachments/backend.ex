@@ -30,4 +30,16 @@ defmodule EmAttachments.Backend do
   log a warning and delete the tracking row without retrying.
   """
   @callback finalize(id :: String.t(), opts :: keyword()) :: :ok | {:error, term()}
+
+  @doc """
+  Builds the opts for a `put/3` call, adding the file metadata every backend may declare
+  about the object it is about to write.
+  """
+  @spec put_opts(keyword(), EmAttachments.SourceFile.t(), String.t() | nil) :: keyword()
+  def put_opts(backend_opts, source, content_type) do
+    Keyword.merge(backend_opts,
+      content_type: content_type,
+      filename: EmAttachments.SourceFile.filename(source)
+    )
+  end
 end

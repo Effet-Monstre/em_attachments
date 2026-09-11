@@ -194,10 +194,12 @@ defmodule EmAttachments.Plugins.Derivatives do
   end
 
   defp upload_item(key_path, item, backend_mod, backend_opts) do
-    id = Util.random_id(8)
+    {content_type, extension} = EmAttachments.Mime.type_and_extension(item)
+    id = Util.uuid_v7() <> EmAttachments.Mime.extension_suffix(extension)
+    put_opts = EmAttachments.Backend.put_opts(backend_opts, item, content_type)
 
     try do
-      case backend_mod.put(id, item, backend_opts) do
+      case backend_mod.put(id, item, put_opts) do
         :ok ->
           {:ok, key_path, id}
 

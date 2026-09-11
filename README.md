@@ -31,7 +31,6 @@ end
 ```elixir
 # config/config.exs
 config :em_attachments,
-  secret_key: "long-random-secret",   # required — used to sign file IDs
   config: [
     store: {EmAttachments.Backends.S3, bucket: "my-bucket", acl: :public_read}
   ]
@@ -41,7 +40,6 @@ For local development use `EmAttachments.Backends.Local`:
 
 ```elixir
 config :em_attachments,
-  secret_key: "dev-secret",
   config: [
     store: {EmAttachments.Backends.Local, fs_path: "/var/app/store", render_path: "/files/store"}
   ]
@@ -104,6 +102,24 @@ url = AvatarUploader.url(file)
 # 3. Delete (removes file + all derivatives from store)
 AvatarUploader.delete(file)
 ```
+
+### Asset IDs and storage keys
+
+`file.id` is a UUIDv7 with the detected file extension appended, and the storage key is
+always `<prefix>/<file.id>`:
+
+```
+uploads/019bf3c2-7a41-7c9e-b8d2-3f1a2b4c5d6e.jpg
+```
+
+The extension and the `Content-Type` sent to the backend both come from the file's magic
+bytes, never from the submitted filename. This works whether or not the `Mime` plugin is
+declared — the plugin adds validation and exposes the result in `metadata`, but detection
+for the key and the content type happens either way. Files whose format is not recognised
+get no extension and no content type rather than a guessed one.
+
+Derivatives follow the same scheme and are sniffed individually, so a thumbnail encoded in
+a different format than its source declares its own type.
 
 ## Ecto integration
 
@@ -205,10 +221,19 @@ cast_attachments(changeset, [:avatar], reprocess: true)
   access_key_id: "...",        # default: AWS_ACCESS_KEY_ID env var
   secret_access_key: "...",    # default: AWS_SECRET_ACCESS_KEY env var
   acl: :public_read,           # :private (default) | :public_read | :authenticated_read
-  url_expires_in: 3600}        # presigned URL TTL in seconds
+  url_expires_in: 3600,        # presigned URL TTL in seconds
+  content_disposition: :inline} # :inline | :attachment — omitted entirely by default
 ```
 
 No ExAws dependency — uses AWS Signature v4 directly via `req`.
+
+Objects are written with the `Content-Type` detected from their bytes, so they render in a
+browser instead of downloading as `binary/octet-stream`. Setting `content_disposition` adds
+a `Content-Disposition` header carrying the original filename.
+
+Objects uploaded before v0.3 have no extension and no content type. Their keys keep working
+untouched — `file.id` has always been the key's basename — but their content type is only
+corrected if they are re-uploaded or reprocessed.
 
 ### Presigned uploads
 
@@ -370,12 +395,14 @@ AvatarUploader.upload(file, dimensions: [adapter: MyApp.FastAdapter])
 
 ## Serialization
 
-Files are HMAC-signed to prevent enumeration and tampering:
-
 ```elixir
 json = AvatarUploader.serialize(file)
-# => signed JSON string safe to embed in an HTML form
+# => JSON string, ready to embed in an HTML hidden input
 
 {:ok, file} = AvatarUploader.deserialize(json)
-# => verifies signature, returns the file struct
+# => the file struct
 ```
+
+The payload is plain JSON, not signed. Anything accepted back from a client via
+`cast_attachments/3` is trusted as-is, so treat a serialized file the same way you
+would treat any other user-supplied parameter.

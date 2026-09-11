@@ -72,7 +72,9 @@ defmodule EmAttachments.Uploader.Pipeline do
 
     case validation_result do
       :ok ->
-        id = Util.random_id()
+        {content_type, extension} = detect_mime(source, ordered, plugin_results)
+        id = Util.uuid_v7() <> EmAttachments.Mime.extension_suffix(extension)
+        put_opts = EmAttachments.Backend.put_opts(store_opts, source, content_type)
 
         file =
           struct(uploader, %{
@@ -88,7 +90,7 @@ defmodule EmAttachments.Uploader.Pipeline do
 
         put_result =
           try do
-            store_mod.put(id, source, store_opts)
+            store_mod.put(id, source, put_opts)
           rescue
             exception ->
               safe_delete(store_mod, id, store_opts)
@@ -156,6 +158,20 @@ defmodule EmAttachments.Uploader.Pipeline do
     catch
       _, _ -> :ok
     end
+  end
+
+  defp detect_mime(source, ordered, plugin_results) do
+    case mime_plugin_result(ordered, plugin_results) do
+      %{} = result -> {result[:type], result[:extension]}
+      nil -> EmAttachments.Mime.type_and_extension(source)
+    end
+  end
+
+  defp mime_plugin_result(ordered, plugin_results) do
+    Enum.find_value(ordered, fn
+      {key, EmAttachments.Plugins.Mime, _opts} -> plugin_results[key]
+      _ -> nil
+    end)
   end
 
   defp cleanup_source(%MemoryFile{} = source), do: MemoryFile.cleanup(source)
@@ -246,8 +262,7 @@ defmodule EmAttachments.Uploader.Pipeline do
 
   def presign_upload(uploader) do
     {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
-    id = Util.random_id()
-    store_mod.presign_upload(id, store_opts)
+    store_mod.presign_upload(Util.uuid_v7(), store_opts)
   end
 
   def serialize(_uploader, file) do

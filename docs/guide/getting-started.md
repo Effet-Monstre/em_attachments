@@ -89,6 +89,24 @@ AvatarUploader.delete(file)
 | `url/1` | Returns the public URL from the storage backend |
 | `delete/1` | Removes the file and all its derivatives |
 
+### Asset IDs and storage keys
+
+`file.id` is a UUIDv7 with the detected extension appended, and the storage key is always
+`<prefix>/<file.id>`:
+
+```
+uploads/019bf3c2-7a41-7c9e-b8d2-3f1a2b4c5d6e.jpg
+```
+
+The extension and the `Content-Type` sent to the backend are both read from the file's
+magic bytes, never from the submitted filename, and this happens whether or not the `Mime`
+plugin is declared. An unrecognised format gets no extension and no content type rather
+than a guessed one. Derivatives are sniffed individually, so a thumbnail in a different
+format than its source declares its own type.
+
+Objects written before v0.3 have no extension and no content type. Their keys keep working
+untouched, since `file.id` has always been the key's basename.
+
 ## Ecto Integration
 
 When `ecto` is available, each uploader is also an `Ecto.Type` and can be used as a field type directly.
