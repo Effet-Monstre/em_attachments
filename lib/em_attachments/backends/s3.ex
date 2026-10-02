@@ -36,6 +36,8 @@ defmodule EmAttachments.Backends.S3 do
   alias EmAttachments.{BackendFile, SourceFile}
   alias EmAttachments.Backends.S3.Signer
 
+  @response_keys ~w(content_type content_disposition cache_control content_language content_encoding expires)a
+
   @impl true
   def put(id, %BackendFile{} = source, opts) do
     state = BackendFile.state(source)
@@ -77,16 +79,17 @@ defmodule EmAttachments.Backends.S3 do
 
   @impl true
   def url(id, opts) do
-    case opts[:acl] do
-      :public_read ->
+    case {opts[:acl], response_params(opts)} do
+      {:public_read, []} ->
         {:ok, public_url(id, opts)}
 
-      _ ->
+      {_acl, params} ->
         {:ok,
          Signer.presign_url(
            object_url(id, opts),
            opts[:url_expires_in] || opts[:expires_in] || 3600,
-           opts
+           opts,
+           params
          )}
     end
   end
@@ -204,6 +207,18 @@ defmodule EmAttachments.Backends.S3 do
 
   defp put_header(headers, _name, nil), do: headers
   defp put_header(headers, name, value), do: Map.put(headers, name, value)
+
+  defp response_params(opts) do
+    for {key, value} <- Keyword.validate!(opts[:response] || [], @response_keys) do
+      param = "response-" <> String.replace(to_string(key), "_", "-")
+      {param, response_value(key, value, opts[:filename])}
+    end
+  end
+
+  defp response_value(:content_disposition, mode, filename) when is_atom(mode),
+    do: disposition(mode, filename)
+
+  defp response_value(_key, value, _filename), do: value
 
   defp disposition(nil, _filename), do: nil
   defp disposition(mode, nil), do: to_string(mode)
