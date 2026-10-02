@@ -72,7 +72,7 @@ defmodule EmAttachments.Backends.S3.Signer do
   end
 
   @doc "Generates a presigned GET URL."
-  def presign_url(url, expires_in, opts) do
+  def presign_url(url, expires_in, opts, query_params \\ []) do
     {access_key, secret_key, region} = credentials(opts)
     now = DateTime.utc_now()
     datetime_str = format_datetime(now)
@@ -87,6 +87,7 @@ defmodule EmAttachments.Backends.S3.Signer do
       {"X-Amz-Date", datetime_str},
       {"X-Amz-Expires", to_string(expires_in)},
       {"X-Amz-SignedHeaders", "host"}
+      | query_params
     ]
 
     canonical_query =

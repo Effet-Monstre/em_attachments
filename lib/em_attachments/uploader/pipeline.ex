@@ -223,7 +223,8 @@ defmodule EmAttachments.Uploader.Pipeline do
   def resolve_url(uploader, file, call_opts) do
     {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
     ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
-    backend = {store_mod, store_opts}
+    plugin_keys = Enum.map(ordered, &elem(&1, 0))
+    backend_opts = Keyword.merge(store_opts, Keyword.drop(call_opts, plugin_keys))
 
     plugin_url =
       Enum.reduce_while(ordered, :skip, fn {key, mod, plugin_opts}, _ ->
@@ -233,7 +234,7 @@ defmodule EmAttachments.Uploader.Pipeline do
           case mod.url(file, plugin_call_opts, %{
                  plugin_key: key,
                  plugin_opts: plugin_opts,
-                 backend: backend
+                 backend: {store_mod, backend_opts}
                }) do
             {:ok, url} -> {:halt, {:ok, url}}
             :skip -> {:cont, :skip}
@@ -248,12 +249,9 @@ defmodule EmAttachments.Uploader.Pipeline do
         url
 
       :skip ->
-        plugin_keys = Enum.map(ordered, &elem(&1, 0))
-        backend_call_opts = Keyword.drop(call_opts, plugin_keys)
-        {backend_mod, backend_opts} = backend
-        merged_opts = Keyword.merge(backend_opts, backend_call_opts)
+        url_opts = Keyword.put_new(backend_opts, :filename, file.metadata[:filename])
 
-        case backend_mod.url(file.id, merged_opts) do
+        case store_mod.url(file.id, url_opts) do
           {:ok, url} -> url
           _ -> nil
         end

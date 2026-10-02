@@ -1,7 +1,7 @@
 if Code.ensure_loaded?(Phoenix.Router) do
   defmodule EmAttachments.Plug.UploadTest do
     use ExUnit.Case, async: false
-    use Plug.Test
+    import Plug.Test
 
     alias EmAttachments.Test.{Fixtures, Router}
 
