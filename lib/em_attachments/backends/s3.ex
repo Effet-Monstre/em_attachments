@@ -158,7 +158,7 @@ defmodule EmAttachments.Backends.S3 do
         |> Map.put("content-length", Integer.to_string(stat.size))
 
       headers = Signer.sign_request(:put, url, request_headers, :unsigned, opts)
-      body = File.stream!(path, [], 64 * 1024)
+      body = File.stream!(path, 64 * 1024)
 
       case Req.put(url, request_options(opts, headers: headers, body: body)) do
         {:ok, %{status: s}} when s in 200..299 -> :ok
