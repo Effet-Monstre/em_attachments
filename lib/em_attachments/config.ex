@@ -144,7 +144,6 @@ defmodule EmAttachments.Config do
       case all()[type] do
         {m, o} -> {m, o}
         m when is_atom(m) -> {m, []}
-        nil -> {nil, []}
       end
 
     mod = override_mod || global_mod

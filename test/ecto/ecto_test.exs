@@ -6,7 +6,6 @@ defmodule EmAttachments.EctoTest do
 
   alias EmAttachments.Test.{
     BasicUploader,
-    DerivativeUploader,
     UserRecord,
     MimeAndDimensionsRecord,
     StrictDimensionsRecord,
