@@ -1,0 +1,99 @@
+name: Maintenance
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      merge:
+        description: Merge the pull request and tag the release once every gate passes
+        type: boolean
+        default: true
+
+concurrency:
+  group: maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  maintenance:
+    name: Maintenance
+    if: github.repository == 'Effet-Monstre/em_attachments'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+      KRANQ_URL: ${{ secrets.KRANQ_URL }}
+      KRANQ_SSH_KEY: ${{ secrets.KRANQ_SSH_KEY }}
+      INFRASTRUCTURE_REF: ${{ vars.INFRASTRUCTURE_REF || 'main' }}
+    steps:
+      - name: Checkout the branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check that SYNC_TOKEN can push
+        run: |
+          git push --dry-run --quiet "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" \
+            HEAD:refs/heads/kranq-access-check || {
+            echo "SYNC_TOKEN cannot push to $GITHUB_REPOSITORY: it needs Contents, Pull requests and Workflows, read and write" >&2
+            exit 1
+          }
+      - name: Install the kranq key
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$KRANQ_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 bitbucket.org >> ~/.ssh/known_hosts 2> /dev/null
+      - name: Fetch the infrastructure tooling
+        run: |
+          git clone --quiet --depth 1 --branch "$INFRASTRUCTURE_REF" \
+            git@bitbucket.org:effetmonstre/infrastructure.git "$RUNNER_TEMP/infrastructure"
+      - name: Update the dependencies on kranq
+        run: |
+          KRANQ_SSH_KEY_FILE="$HOME/.ssh/id_ed25519" \
+            "$RUNNER_TEMP/infrastructure/ci/kranq-push" "$RUNNER_TEMP/infrastructure/ci/tasks/maintenance.yaml" \
+            GH_TOKEN GITHUB_REPOSITORY GITHUB_REF_NAME INFRASTRUCTURE_REF
+      - name: Collect what the run left
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          if git fetch --quiet kranq 2> /dev/null && git cat-file -e kranq/result:ci-artifacts 2> /dev/null; then
+            git archive kranq/result ci-artifacts | tar -x -C "$RUNNER_TEMP/out"
+            cat "$RUNNER_TEMP/out/ci-artifacts/summary.md" >> "$GITHUB_STEP_SUMMARY" 2> /dev/null || true
+          fi
+      - name: Upload what the run left
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maintenance
+          path: ${{ runner.temp }}/out/ci-artifacts
+          if-no-files-found: ignore
+      - name: Merge the pull request and tag the release
+        if: github.event_name == 'schedule' || inputs.merge
+        run: |
+          pr="$(cat ci-artifacts/pull_request 2> /dev/null || true)"
+          [ -n "$pr" ] || { echo "the run opened no pull request: nothing to merge"; exit 0; }
+          version="$(cat ci-artifacts/version)"
+          head="$(gh pr view "$pr" --json headRefOid --jq .headRefOid)"
+          git merge-base --is-ancestor "$head" HEAD || {
+            echo "pull request #$pr moved to $head after kranq verified it; leaving it for a person" >&2
+            exit 1
+          }
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "v$version is already tagged; leaving pull request #$pr for a person" >&2
+            exit 1
+          fi
+          for _ in $(seq 30); do
+            gh pr checks "$pr" --json name --jq length 2> /dev/null | grep -qv '^0$' && break
+            sleep 20
+          done
+          gh pr checks "$pr" --watch --interval 30 || {
+            echo "GitHub checks failed on pull request #$pr; leaving it for a person" >&2
+            exit 1
+          }
+          gh pr merge "$pr" --merge --match-head-commit "$head" --delete-branch
+          sha="$(gh pr view "$pr" --json mergeCommit --jq .mergeCommit.oid)"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$version" -f sha="$sha" > /dev/null
+          echo "merged #$pr as $sha and tagged v$version" | tee -a "$GITHUB_STEP_SUMMARY"
