@@ -44,3 +44,16 @@ MIME type and extension always come from magic bytes, never from a submitted fil
 
 The `uploads` tracking table holds in-flight assets only — rows are deleted once the
 Sweeper finalizes them, so it is not an inventory of live objects.
+
+## Toolchain and maintenance
+
+`.tool-versions` pins Erlang/OTP and Elixir and `.nvmrc` pins Node for every place that
+builds this repository: GitHub CI reads them, and so does the kranq image (`Kranqfile`).
+Change a version there, never in a workflow.
+
+`.github/workflows/maintenance.yml` runs every Monday. It sends the repository to kranq,
+which runs the shared `maintenance` task from the infrastructure repository with the extra
+rules in `ci/tasks/maintenance.md`, then merges the pull request once GitHub CI is green and
+tags the patch release. `ci/tasks/setup.md` is the bring-up it follows. Repository settings:
+the `KRANQ_URL`, `KRANQ_SSH_KEY` and `SYNC_TOKEN` secrets, and optionally the
+`INFRASTRUCTURE_REF` variable.

@@ -1,0 +1,23 @@
+MEMORY 6GiB
+CPUS 4
+
+RUN <<SH
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends imagemagick unzip
+command -v magick > /dev/null || sudo ln -s "$(command -v convert)" /usr/local/bin/magick
+SH
+
+COPY .tool-versions ci/tasks/install-beam.sh .
+RUN bash install-beam.sh
+
+COPY .nvmrc ci/tasks/install-node.sh .
+RUN bash install-node.sh
+
+COPY mix.exs mix.lock .
+RUN mix deps.get
+
+COPY package.json package-lock.json .
+RUN npm ci
+
+COPY docker-compose.yml .
+RUN docker compose pull --quiet db || echo "could not pre-pull postgres; the task will pull it cold" >&2
