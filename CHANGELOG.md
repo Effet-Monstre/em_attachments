@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.2
+
+Dependency maintenance. No requirement in `mix.exs` changed: every lower bound stays where
+it was, so this release asks nothing new of an application.
+
+### Tested against
+
+The library is now developed and tested against Req 0.7.5 (was 0.5.17), Ecto 3.14.2 and
+Ecto SQL 3.14.0 (were 3.13.5), Phoenix 1.8.15 (was 1.8.5), Plug 1.20.3 (was 1.19.1),
+Vix 0.42.0 (was 0.38.0), Postgrex 0.22.4 (was 0.22.0), Finch 0.24.0, Mint 1.11.0 and
+Decimal 3.1.1. The `~> 0.5` requirement on Req already allowed 0.6 and 0.7, and the S3
+backend and the `UrlUpload` plugin work unchanged on both sides of that line.
+
+If you pass `:req_options` to the S3 backend or to `UrlUpload`, note that Req 0.6 made
+response decompression opt-in (`compressed: true`) and archive decoding opt-in
+(`decoders:`), and Req 0.7 deprecated `finch: name` in favour of `finch: [name: name]`.
+
+### Advisories
+
+The versions above carry the fixes for advisories against Req (decompression bomb,
+multipart header injection), Mint, HPAX, Plug, Phoenix, Postgrex and Decimal. This
+library's lockfile does not reach your application: run `mix hex.audit` in your own
+project and update what it reports.
+
 ## 0.3.0
 
 ### Storage keys and asset IDs
