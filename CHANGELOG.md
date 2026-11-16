@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.3
+
+Dependency maintenance. No requirement in `mix.exs` changed: every lower bound stays where
+it was, so this release asks nothing new of an application.
+
+### Tested against
+
+The library is now developed and tested against Ecto 3.14.3 (was 3.14.2), Phoenix 1.8.16
+(was 1.8.15), Vix 0.43.0 (was 0.42.0), Decimal 3.2.0, Plug.Crypto 2.2.1, WebSockAdapter
+0.7.2, NimbleOptions 1.2.0 and NimblePool 1.2.0.
+
+### Advisories
+
+The versions above carry the fixes for EEF-CVE-2026-118391 (Ecto, HIGH: unbounded query
+cache growth from interpolated JSON paths and splice lists), EEF-CVE-2026-97853 (Decimal,
+MEDIUM: unbounded allocation in `Decimal.round/3`) and EEF-CVE-2026-105963 (Plug.Crypto,
+MEDIUM: secret key base exposed in stack trace arguments). This library's lockfile does
+not reach your application: run `mix hex.audit` in your own project and update what it
+reports.
+
 ## 0.3.2
 
 Dependency maintenance. No requirement in `mix.exs` changed: every lower bound stays where
