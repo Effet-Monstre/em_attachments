@@ -34,8 +34,23 @@ defmodule EmAttachments.MimeTest do
       assert {:ok, {"application/pdf", "pdf"}} = detect_bytes("%PDF-1.7\nrest")
       assert {:ok, {"application/zip", "zip"}} = detect_bytes(<<"PK", 3, 4, 0, 0, 0, 0>>)
       assert {:ok, {"image/webp", "webp"}} = detect_bytes(<<"RIFF", 0::32, "WEBP", 0, 0, 0, 0>>)
-      assert {:ok, {"video/mp4", "mp4"}} = detect_bytes(<<0::32, "ftyp", 0, 0, 0, 0>>)
+      assert {:ok, {"video/mp4", "mp4"}} = detect_bytes(<<0::32, "ftyp", "isom", 0::32>>)
       assert {:ok, {"image/bmp", "bmp"}} = detect_bytes(<<"BM", 0, 0, 0, 0>>)
+    end
+
+    test "tells ISO media files apart by their major brand" do
+      ftyp = fn brand -> detect_bytes(<<0::32, "ftyp", brand::binary-size(4), 0::32>>) end
+
+      assert {:ok, {"video/mp4", "mp4"}} = ftyp.("mp42")
+      assert {:ok, {"video/mp4", "mp4"}} = ftyp.("M4V ")
+      assert {:ok, {"video/quicktime", "mov"}} = ftyp.("qt  ")
+      assert {:ok, {"image/heic", "heic"}} = ftyp.("heic")
+      assert {:ok, {"image/heic", "heic"}} = ftyp.("mif1")
+      assert {:ok, {"image/avif", "avif"}} = ftyp.("avif")
+      assert {:ok, {"video/3gpp", "3gp"}} = ftyp.("3gp5")
+      assert {:ok, {"video/3gpp2", "3g2"}} = ftyp.("3g2a")
+      assert {:ok, {"audio/mp4", "m4a"}} = ftyp.("M4A ")
+      assert {:ok, {nil, nil}} = ftyp.(<<0, 0, 0, 0>>)
     end
 
     test "ignores the filename extension and reads the bytes" do

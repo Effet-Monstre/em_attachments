@@ -25,6 +25,10 @@ defmodule EmAttachments.Mime do
 
   @spec detect_source(SourceFile.t()) ::
           {:ok, {String.t() | nil, String.t() | nil}} | {:error, term()}
+  def detect_source(%EmAttachments.BackendFile{} = source) do
+    with {:ok, head} <- EmAttachments.BackendFile.read_head(source, 16), do: detect_bytes(head)
+  end
+
   def detect_source(source) do
     with {:ok, path} <- SourceFile.fetch_local_path(source), do: detect(path)
   end
@@ -75,8 +79,10 @@ defmodule EmAttachments.Mime do
   defp detect_bytes(<<0xFF, 0xFB, _::binary>>), do: {:ok, {"audio/mpeg", "mp3"}}
   defp detect_bytes(<<0xFF, 0xF3, _::binary>>), do: {:ok, {"audio/mpeg", "mp3"}}
 
-  # MP4 / MOV (ftyp box)
-  defp detect_bytes(<<_::32, "ftyp", _::binary>>), do: {:ok, {"video/mp4", "mp4"}}
+  # ISO media (ftyp box): the major brand says what it is. Only the brands browsers play are
+  # videos; HEIF and AVIF are images, 3GPP and M4A are their own types. An unknown brand has
+  # no type rather than a guessed one.
+  defp detect_bytes(<<_::32, "ftyp", brand::binary-size(4), _::binary>>), do: {:ok, ftyp(brand)}
 
   # BMP
   defp detect_bytes(<<"BM", _::binary>>), do: {:ok, {"image/bmp", "bmp"}}
@@ -87,4 +93,17 @@ defmodule EmAttachments.Mime do
 
   # No magic bytes matched — leave type/extension unset rather than failing the upload.
   defp detect_bytes(_), do: {:ok, {nil, nil}}
+
+  @mp4_brands ~w(isom iso2 iso3 iso4 iso5 iso6 mp41 mp42 avc1 dash mmp4) ++
+                ["M4V ", "M4VH", "M4VP"]
+  @heic_brands ~w(heic heix heim heis hevc hevx mif1 msf1)
+
+  defp ftyp(brand) when brand in @mp4_brands, do: {"video/mp4", "mp4"}
+  defp ftyp("qt  "), do: {"video/quicktime", "mov"}
+  defp ftyp(brand) when brand in @heic_brands, do: {"image/heic", "heic"}
+  defp ftyp(brand) when brand in ["avif", "avis"], do: {"image/avif", "avif"}
+  defp ftyp(<<"3g2", _>>), do: {"video/3gpp2", "3g2"}
+  defp ftyp(<<"3gp", _>>), do: {"video/3gpp", "3gp"}
+  defp ftyp(brand) when brand in ["M4A ", "M4B "], do: {"audio/mp4", "m4a"}
+  defp ftyp(_brand), do: {nil, nil}
 end

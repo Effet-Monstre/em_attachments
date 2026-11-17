@@ -103,6 +103,35 @@ defmodule EmAttachments.BackendFile do
     end)
   end
 
+  @doc """
+  The first `bytes` of the file: from the local copy once downloaded, else a ranged read
+  when the backend has one (`get_range/4`), so sniffing a large stored file downloads 16
+  bytes, not the file.
+  """
+  @spec read_head(t(), pos_integer()) :: {:ok, binary()} | {:error, term()}
+  def read_head(%__MODULE__{} = source, bytes) do
+    case state(source) do
+      %{local_path: path} when is_binary(path) ->
+        read_local_head(path, bytes)
+
+      %{backend_mod: mod, backend_opts: opts, id: id} ->
+        if Code.ensure_loaded?(mod) and function_exported?(mod, :get_range, 4) do
+          mod.get_range(id, 0, bytes - 1, opts)
+        else
+          with {:ok, path} <- ensure_local(source), do: read_local_head(path, bytes)
+        end
+    end
+  end
+
+  defp read_local_head(path, bytes) do
+    File.open(path, [:read, :binary], fn file ->
+      case IO.binread(file, bytes) do
+        data when is_binary(data) -> data
+        _eof -> ""
+      end
+    end)
+  end
+
   @doc "Returns the raw Agent state map (reads filename/size without downloading)."
   @spec state(t()) :: map()
   def state(%__MODULE__{pid: pid}), do: Agent.get(pid, & &1)

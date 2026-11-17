@@ -39,8 +39,48 @@ defmodule EmAttachments.Backends.Local do
   end
 
   @impl true
-  def presign_upload(_id, _opts) do
-    {:error, :not_supported}
+  def head(id, opts) do
+    case File.stat(dest_path(id, opts)) do
+      {:ok, %{type: :regular, size: size}} -> {:ok, %{size: size}}
+      {:ok, _other} -> {:error, :not_found}
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def get_range(id, first, last, opts) do
+    case File.open(dest_path(id, opts), [:read, :binary]) do
+      {:ok, file} ->
+        try do
+          case :file.pread(file, first, last - first + 1) do
+            {:ok, data} -> {:ok, data}
+            :eof -> {:ok, ""}
+            {:error, reason} -> {:error, reason}
+          end
+        after
+          File.close(file)
+        end
+
+      {:error, :enoent} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  A local store has no presigned URL of its own: the upload goes to the
+  `EmAttachments.Plug.Upload` mounted in the application (`:upload_url`, given by the plug),
+  which checks the slot's token (a field, `:slot_token`) and writes the file at `id`.
+  """
+  @impl true
+  def presign_upload(_id, opts) do
+    case opts[:upload_url] do
+      url when is_binary(url) -> {:ok, %{url: url, fields: %{"token" => opts[:slot_token]}}}
+      nil -> {:error, :not_supported}
+    end
   end
 
   defp dest_path(id, opts) do

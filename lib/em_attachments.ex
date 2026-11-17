@@ -21,6 +21,28 @@ defmodule EmAttachments do
   def url(_, _), do: nil
 
   @doc """
+  The name to download a file as: `name` ending with the extension of the file's actual type
+  (its asset id's, read from its bytes), `.jpg` and `.jpeg` being one. A legacy id without
+  extension leaves `name` as it is.
+
+      download_name(file, "Bail signé")   # => "Bail signé.pdf"
+  """
+  @spec download_name(%{id: String.t()}, String.t()) :: String.t()
+  def download_name(%{id: id}, name) when is_binary(id) and is_binary(name) do
+    extension = Path.extname(id)
+
+    if extension == "" or same_extension?(Path.extname(name), extension),
+      do: name,
+      else: name <> extension
+  end
+
+  defp same_extension?(given, actual) do
+    jpeg = ~w(.jpg .jpeg)
+    given = String.downcase(given)
+    given == actual or (given in jpeg and actual in jpeg)
+  end
+
+  @doc """
   Fetches the data produced by a plugin, by its key.
 
   Works with the `ctx` passed to a plugin's `init/2` or `upload/3`, the map passed

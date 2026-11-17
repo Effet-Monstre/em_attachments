@@ -173,9 +173,20 @@ end
 | `{:binary, data}` | Treat `data` (raw bytes) as an in-memory file and run the upload pipeline. Filename defaults to `"upload"`. |
 | `{:binary, data, filename}` | Same as above but uses the given `filename`. |
 | `nil` or `""` | Delete existing file inside transaction; set field to `nil` |
-| JSON string (from prior serialize call) | Re-submit a pending file; mark permanent on save |
-| Bare file ID string matching current field | No-op |
+| Signed token (`AvatarUploader.sign(file)`, `to_string(file)`, what `EmAttachments.Plug.Upload` answers) | Attach a stored file; claimed on save, once |
+| The uploader's struct (server code only: params can't hold one) | Attach a file the application stored itself; claimed on save |
+| Bare file ID, or its serialized JSON, matching the current field | No-op |
+| Any other unsigned value (a serialized file included) | Error `"is invalid"`: never trusted |
 | Key absent from params | No-op (unless `promote: true` / `reprocess: true`) |
+
+A file is **claimed once**: saving a record with its token turns its tracking row from
+`pending` to `permanent`. A second record given the same token, or a token whose upload
+expired or whose record was deleted, gets `"has already been used or has expired"`. One file,
+one record: the library's own cleanup (a replaced or removed file, a deleted record) never
+deletes a file another record holds.
+
+A record deleted without a changeset (`Repo.delete(struct)`, `delete_all`) releases its files
+with `EmAttachments.Ecto.release(repo, files)`, typically from the schema's delete hook.
 
 ### Deferred confirmation
 
@@ -237,13 +248,11 @@ corrected if they are re-uploaded or reprocessed.
 
 ### Presigned uploads
 
-For direct browser-to-S3 uploads, generate presigned POST credentials:
-
-```elixir
-{:ok, %{url: url, fields: fields}} = AvatarUploader.presign_upload()
-# Render url + fields as a multipart form; the browser uploads directly to S3.
-# After upload, call AvatarUploader.upload/1 with the returned object key.
-```
+Direct uploads go through `EmAttachments.Plug.Upload` (below): a slot
+(`AvatarUploader.presign/1`), the browser's POST to it, then `AvatarUploader.complete/2`. On
+S3 the slot is a presigned POST writing exactly one key, capped by `content-length-range`; on
+the Local backend it is the plug's own `/local`. The bucket needs a CORS rule allowing `POST`
+from the application's origin.
 
 ### Custom backend
 
@@ -258,6 +267,10 @@ defmodule MyApp.GCSBackend do
   def delete(id, opts), do: ...
   def url(id, opts), do: ...
   def presign_upload(id, opts), do: ...
+
+  # Optional: what direct uploads need (`complete/2`): the size, and the first bytes to sniff
+  def head(id, opts), do: ...
+  def get_range(id, first, last, opts), do: ...
 
   # Optional: called by the Sweeper after confirming a permanent upload
   def finalize(id, opts), do: ...
@@ -367,19 +380,47 @@ Plugin callbacks (all optional):
 | `url/3` | When resolving a URL — return `{:ok, url}` to short-circuit |
 | `after_confirm/2` | Called by Sweeper after a pending upload is confirmed permanent |
 
-## Direct browser uploads (AJAX)
+## Browser uploads: `EmAttachments.Plug.Upload`
 
-Use `EmAttachments.Plug.Upload` to accept files via AJAX before form submit:
+Mount the plug behind your own authentication; it answers a **signed token** that
+`cast_attachments/3` accepts (a form's hidden input, a JSON API's param):
 
 ```elixir
 # router.ex (Phoenix)
-forward "/attachments/avatar", EmAttachments.Plug.Upload,
+forward "/api/uploads", EmAttachments.Plug.Upload,
   uploader: MyApp.AvatarUploader,
-  max_size: 10_000_000   # bytes, default 100MB
+  max_size: 10_000_000,                              # bytes, default 100MB
+  validates: [mime: [type: ~w(image/png image/jpeg)]] # over the uploader's own
 ```
 
-The endpoint returns a signed JSON string on success (HTTP 200) or a JSON error on failure (HTTP 422).
-Submit the JSON string as a hidden input value; `cast_attachments/3` will pick it up on form submit.
+An application that declares each path with its verb mounts it route by route instead:
+`post "/api/uploads/presign", EmAttachments.Plug.Upload, [action: :presign] ++ opts` (and
+`:local`, `:complete`), with `local_url:` the path of its `:local` route.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /` | multipart `file` | the file (through the application) |
+| `POST /presign` | `size` (optional, refused early when too large) | `{url, fields, token}`: a slot |
+| `POST <url>` | multipart: every `fields` entry, then `file` | S3's answer, or `204` from `/local` |
+| `POST /complete` | `token`, `filename` | the file |
+
+The file is `{token, id, filename, size, content_type}` (`200`). Refusals are `422`
+`{error, message}` (`too_large`, `not_accepted`, `invalid_token`, `not_found`, `no_file`), a
+storage failure `502` (`error: "storage"`, `EmAttachments.Error.message/1`).
+
+`complete` reads the object's size and its first bytes only (ranged reads), validates them,
+copies the object to its asset id (server-side on S3) and removes the slot. A slot never
+completed is tracked like any pending upload and removed by the Sweeper.
+
+```js
+const slot = await post("/api/uploads/presign", { size: file.size })
+const form = new FormData()
+Object.entries(slot.fields).forEach(([k, v]) => form.append(k, v))
+form.append("file", file) // last: S3 ignores what follows it
+await fetch(slot.url, { method: "POST", body: form })
+const { token } = await post("/api/uploads/complete", { token: slot.token, filename: file.name })
+// send `token` with the record
+```
 
 ## Per-call backend overrides
 
@@ -403,6 +444,9 @@ json = AvatarUploader.serialize(file)
 # => the file struct
 ```
 
-The payload is plain JSON, not signed. Anything accepted back from a client via
-`cast_attachments/3` is trusted as-is, so treat a serialized file the same way you
-would treat any other user-supplied parameter.
+The payload is plain JSON, not signed: `cast_attachments/3` refuses it from a client. Hand
+a client `AvatarUploader.sign(file)` instead (`to_string(file)` is the same), valid as long as
+the pending upload (`expiry`, 24 h by default).
+
+The signing key is `config :em_attachments, :config, secret_key: ...` (32 bytes at least,
+`{:env, "VAR"}` accepted). Signing raises without it.

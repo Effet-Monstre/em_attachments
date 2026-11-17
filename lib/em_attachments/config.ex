@@ -30,6 +30,25 @@ defmodule EmAttachments.Config do
     end
   end
 
+  @doc """
+  The key `EmAttachments.Signer` signs with (`secret_key:`, or `{:env, "VAR"}`), raising when
+  it is missing or shorter than 32 bytes.
+  """
+  def secret_key! do
+    case resolve_value(all()[:secret_key]) do
+      key when is_binary(key) and byte_size(key) >= 32 ->
+        key
+
+      _ ->
+        raise "EmAttachments: :secret_key (32 bytes at least) is not configured under " <>
+                "config :em_attachments, :config. It signs the files and upload slots " <>
+                "handed to clients."
+    end
+  end
+
+  @doc "Returns the pending upload expiry in seconds (default: 24h)."
+  def expiry_seconds, do: div(expiry(), 1000)
+
   @doc "Returns the pending upload expiry in milliseconds (default: 24h)."
   def expiry do
     all()[:expiry] || @default_expiry

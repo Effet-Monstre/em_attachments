@@ -76,11 +76,12 @@ defmodule EmAttachments.EctoTest do
     assert record.avatar.metadata.plugins.mime.type == "image/png"
   end
 
-  test "upload via JSON hidden field (pending resubmit) is marked permanent on commit" do
+  test "upload via a signed token (hidden field, pending resubmit) is marked permanent on commit" do
     {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "photo.png"})
-    json = BasicUploader.serialize(file)
+    token = to_string(file)
+    assert token == BasicUploader.sign(file)
 
-    params = %{"avatar" => json}
+    params = %{"avatar" => token}
     cs = changeset(%UserRecord{}, params) |> cast_attachments([:avatar])
 
     assert cs.valid?
@@ -214,11 +215,24 @@ defmodule EmAttachments.EctoTest do
     refute Map.has_key?(cs.changes, :avatar)
   end
 
-  test "JSON with different store-file ID is treated as pending resubmit" do
+  test "a signed token for another file is claimed in place of the current one" do
+    {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "avatar.png"})
+    {:ok, other} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "other.png"})
+    record = %UserRecord{id: Ecto.UUID.generate(), avatar: file}
+
+    cs =
+      changeset(record, %{"avatar" => BasicUploader.sign(other)}) |> cast_attachments([:avatar])
+
+    assert cs.valid?
+    assert get_change(cs, :avatar).id == other.id
+    assert length(cs.prepare) == 2
+  end
+
+  test "an unsigned serialized file is refused, never trusted" do
     {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "avatar.png"})
     record = %UserRecord{id: Ecto.UUID.generate(), avatar: file}
 
-    other_json =
+    forged =
       Jason.encode!(%{
         "id" => "other-id",
         "storage" => "store",
@@ -226,17 +240,38 @@ defmodule EmAttachments.EctoTest do
         "metadata" => nil
       })
 
-    cs = changeset(record, %{"avatar" => other_json}) |> cast_attachments([:avatar])
-
-    assert cs.valid?
-    assert length(cs.prepare) == 2
+    for value <- [forged, BasicUploader.serialize(%{file | id: "other-id"}), %{"id" => "x"}] do
+      cs = changeset(record, %{"avatar" => value}) |> cast_attachments([:avatar])
+      refute cs.valid?
+      assert cs.errors[:avatar] == {"is invalid", []}
+    end
   end
 
-  test "pending file JSON from failed form resubmission is marked permanent on commit" do
-    {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "repost.png"})
-    json = BasicUploader.serialize(file)
+  test "a token signed for another uploader is refused" do
+    {:ok, file} =
+      EmAttachments.Test.NoPluginUploader.upload(%{path: Fixtures.png_path(), filename: "a.png"})
 
-    cs = changeset(%UserRecord{}, %{"avatar" => json}) |> cast_attachments([:avatar])
+    token = EmAttachments.Test.NoPluginUploader.sign(file)
+    cs = changeset(%UserRecord{}, %{"avatar" => token}) |> cast_attachments([:avatar])
+
+    refute cs.valid?
+  end
+
+  test "the server's own struct is accepted and claimed" do
+    {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "mms.png"})
+
+    cs = changeset(%UserRecord{}, %{}) |> Map.put(:params, %{"avatar" => file})
+    cs = cast_attachments(cs, [:avatar])
+
+    assert cs.valid?
+    assert get_change(cs, :avatar).id == file.id
+  end
+
+  test "pending file token from failed form resubmission is marked permanent on commit" do
+    {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "repost.png"})
+
+    cs =
+      changeset(%UserRecord{}, %{"avatar" => to_string(file)}) |> cast_attachments([:avatar])
 
     assert cs.valid?
     assert %BasicUploader{storage: :store} = get_change(cs, :avatar)
@@ -329,7 +364,11 @@ defmodule EmAttachments.EctoTest do
     Application.put_env(:em_attachments, :config, Keyword.put(original_config, :repo, Repo))
     on_exit(fn -> Application.put_env(:em_attachments, :config, original_config) end)
 
-    upload = %Plug.Upload{path: Fixtures.txt_path(), filename: "notes.txt", content_type: "text/plain"}
+    upload = %Plug.Upload{
+      path: Fixtures.txt_path(),
+      filename: "notes.txt",
+      content_type: "text/plain"
+    }
 
     {:ok, user} =
       DerivativeDbRecord.changeset(%{"name" => unique_name(), "avatar" => upload})

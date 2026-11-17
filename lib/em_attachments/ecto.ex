@@ -14,15 +14,19 @@ if Code.ensure_loaded?(Ecto.Changeset) do
     ## Param values accepted for each attachment field
 
       - `%Plug.Upload{}` — new file upload. The file is uploaded directly to the store
-        backend as a pending asset. A `prepare_changes` callback marks it permanent
-        atomically with the Ecto transaction. The serialized struct is available as
-        `form[:logo].value` for use as an HTML hidden input on re-render.
+        backend as a pending asset. A `prepare_changes` callback claims it atomically with
+        the Ecto transaction. Its signed token is `form[:logo].value`, for an HTML hidden
+        input on re-render.
+      - A signed token (`MyUploader.sign/1`, what `EmAttachments.Plug.Upload` answers): a
+        file already stored, claimed on save. A file is claimed once: a second record given
+        the same token, or a token whose upload expired or was released, gets an error.
+      - The uploader's struct, from server code (never from params, which can't hold one):
+        a file the application stored itself, claimed the same way.
       - `nil` — explicit deletion. Sets the field to `nil` and schedules removal
         of the previously stored file inside the Ecto transaction.
-      - A JSON string produced by a prior serialize call — used to re-submit a
-        pending file when form validation fails. The file is marked permanent on save.
-      - A bare file ID string — if it matches the current field's ID the cast is a
-        no-op; otherwise an error is added.
+      - The current file's ID (bare, or in its serialized JSON) — a no-op. Any other
+        unsigned value, a serialized file included, is refused: nothing a client sends is
+        trusted unless it was signed.
       - Key absent from params — always a no-op (unless `promote: true`, see below).
 
     ## Options
@@ -59,6 +63,19 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       Enum.reduce(keys, changeset, &cast_attachment(&2, &1, opts))
     end
 
+    @doc """
+    Releases files whose records are deleted outside a changeset (`Repo.delete/1` on a
+    struct, `delete_all`): each is marked for deletion, removed by the Sweeper. `nil`s are
+    skipped.
+    """
+    def release(repo, files) do
+      for %{__struct__: uploader, id: id} = file <- List.wrap(files), is_binary(id) do
+        uploader.mark_pending_for_deletion(repo, file)
+      end
+
+      :ok
+    end
+
     defp cast_attachment(changeset, key, opts) when is_binary(key),
       do: cast_attachment(changeset, String.to_existing_atom(key), opts)
 
@@ -66,6 +83,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       changeset = register_delete_cleanup(changeset, key)
       promote_opt = Keyword.get(opts, :promote, :default)
       params = changeset.params || %{}
+      uploader = changeset.types[key]
 
       fetched =
         with :error <- Map.fetch(params, to_string(key)) do
@@ -84,56 +102,52 @@ if Code.ensure_loaded?(Ecto.Changeset) do
           handle_delete(changeset, key)
 
         {:ok, value} when is_binary(value) ->
-          case Jason.decode(value) do
-            {:ok, map} when is_map(map) -> handle_file_map(changeset, key, value, map, opts)
-            {:error, _} -> handle_bare_id(changeset, key, value)
-          end
+          handle_token(changeset, key, uploader, value, opts)
+
+        {:ok, %^uploader{} = file} ->
+          handle_stored(changeset, key, file, opts)
 
         {:ok, value} when is_map(value) and not is_struct(value) ->
-          handle_file_map(changeset, key, Jason.encode!(value), value, opts)
+          handle_unsigned(changeset, key, value["id"] || value[:id])
 
         {:ok, value} ->
           handle_with_plugins(changeset, key, value, opts)
       end
     end
 
-    defp handle_file_map(changeset, key, json, map, opts) do
-      current_id = get_current_id(changeset.data, key)
-      file_id = map["id"] || map[:id]
-      storage = map["storage"] || map[:storage]
-
-      cond do
-        file_id == current_id ->
-          changeset
-
-        storage in ["store", :store] ->
-          handle_pending_resubmit(changeset, key, json, map, opts)
-
-        true ->
-          add_error(changeset, key, "no file provided")
-      end
-    end
-
-    defp handle_pending_resubmit(changeset, key, json, map, opts) do
-      uploader_name = map["uploader"] || map[:uploader]
-      uploader = String.to_existing_atom(uploader_name)
-
-      case uploader.deserialize(json) do
+    defp handle_token(changeset, key, uploader, value, opts) do
+      case uploader.verify(value) do
         {:ok, file} ->
-          prev_file = get_existing_file(changeset.data, key)
-          schedule_mark_permanent(changeset, key, file, prev_file, opts)
+          handle_stored(changeset, key, file, opts)
 
-        {:error, reason} ->
-          add_error(changeset, key, "invalid attachment: #{inspect(reason)}")
+        {:error, :expired} ->
+          add_error(changeset, key, "has expired")
+
+        {:error, :invalid} ->
+          id =
+            case Jason.decode(value) do
+              {:ok, %{"id" => id}} -> id
+              _ -> value
+            end
+
+          handle_unsigned(changeset, key, id)
       end
     end
 
-    defp handle_bare_id(changeset, key, id) do
-      if id == get_current_id(changeset.data, key) do
+    defp handle_stored(changeset, key, file, opts) do
+      if file.id == get_current_id(changeset.data, key) do
         changeset
       else
-        add_error(changeset, key, "no file provided")
+        prev_file = get_existing_file(changeset.data, key)
+        schedule_mark_permanent(changeset, key, file, prev_file, opts)
       end
+    end
+
+    # An unsigned value only ever names the current file again.
+    defp handle_unsigned(changeset, key, id) do
+      if is_binary(id) and id == get_current_id(changeset.data, key),
+        do: changeset,
+        else: add_error(changeset, key, "is invalid")
     end
 
     defp register_delete_cleanup(changeset, key) do
@@ -195,7 +209,8 @@ if Code.ensure_loaded?(Ecto.Changeset) do
       uploader = changeset.types[key]
 
       result =
-        Enum.find_value(uploader.__cast_plugins__(), :no_cast, fn {plugin_key, plugin_mod, plugin_opts} ->
+        Enum.find_value(uploader.__cast_plugins__(), :no_cast, fn {plugin_key, plugin_mod,
+                                                                   plugin_opts} ->
           if Code.ensure_loaded?(plugin_mod) and function_exported?(plugin_mod, :cast, 2) do
             ctx = %{uploader: uploader, plugin_key: plugin_key, plugin_opts: plugin_opts}
 
@@ -221,11 +236,24 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         changeset
         |> put_change(key, file)
         |> prepare_changes(fn cs ->
-          file.__struct__.mark_permanent(cs.repo, file)
-          if prev_file, do: prev_file.__struct__.mark_pending_for_deletion(cs.repo, prev_file)
-          cs
+          case claim(cs.repo, file) do
+            :ok ->
+              file.__struct__.mark_permanent(cs.repo, file)
+              if prev_file, do: prev_file.__struct__.mark_pending_for_deletion(cs.repo, prev_file)
+              cs
+
+            :error ->
+              add_error(cs, key, "has already been used or has expired")
+          end
         end)
       end
+    end
+
+    # Without tracking (no `:repo` configured) no row was written to claim.
+    defp claim(repo, file) do
+      if EmAttachments.Config.repo(),
+        do: EmAttachments.Upload.claim(repo, file.id),
+        else: :ok
     end
 
     defp handle_reprocess(changeset, key) do
@@ -264,7 +292,5 @@ if Code.ensure_loaded?(Ecto.Changeset) do
     defp uploader_for(%{uploader: uploader_str}) when is_binary(uploader_str) do
       String.to_existing_atom(uploader_str)
     end
-
-
   end
 end

@@ -128,8 +128,11 @@ defmodule EmAttachments.Backends.S3.Signer do
     %{uri | query: full_query} |> URI.to_string()
   end
 
-  @doc "Generates a presigned POST policy for direct browser uploads to S3."
-  def presign_post(bucket_url, bucket, key_prefix, expires_in, opts) do
+  @doc """
+  Generates a presigned POST policy for a direct browser upload to S3, writing exactly `key`
+  (`:max_size` in `opts` caps its length).
+  """
+  def presign_post(bucket_url, bucket, key, expires_in, opts) do
     {access_key, secret_key, region} = credentials(opts)
     now = DateTime.utc_now()
     datetime_str = format_datetime(now)
@@ -142,13 +145,18 @@ defmodule EmAttachments.Backends.S3.Signer do
 
     credential = "#{access_key}/#{date_str}/#{region}/s3/aws4_request"
 
-    conditions = [
-      %{"bucket" => bucket},
-      ["starts-with", "$key", key_prefix],
-      %{"x-amz-algorithm" => "AWS4-HMAC-SHA256"},
-      %{"x-amz-credential" => credential},
-      %{"x-amz-date" => datetime_str}
-    ]
+    conditions =
+      [
+        %{"bucket" => bucket},
+        %{"key" => key},
+        %{"x-amz-algorithm" => "AWS4-HMAC-SHA256"},
+        %{"x-amz-credential" => credential},
+        %{"x-amz-date" => datetime_str}
+      ] ++
+        case opts[:max_size] do
+          max when is_integer(max) -> [["content-length-range", 0, max]]
+          nil -> []
+        end
 
     policy =
       %{"expiration" => expiration, "conditions" => conditions}
@@ -162,7 +170,7 @@ defmodule EmAttachments.Backends.S3.Signer do
       |> Base.encode16(case: :lower)
 
     fields = %{
-      "key" => "#{key_prefix}${filename}",
+      "key" => key,
       "x-amz-algorithm" => "AWS4-HMAC-SHA256",
       "x-amz-credential" => credential,
       "x-amz-date" => datetime_str,

@@ -3,7 +3,7 @@ defmodule EmAttachments.Backend do
   Behaviour for storage backends.
   """
 
-  @optional_callbacks [finalize: 2]
+  @optional_callbacks [finalize: 2, head: 2, get_range: 4]
 
   @callback put(id :: String.t(), source :: EmAttachments.SourceFile.t(), opts :: keyword()) ::
               :ok | {:error, term()}
@@ -19,6 +19,22 @@ defmodule EmAttachments.Backend do
 
   @callback presign_upload(id :: String.t(), opts :: keyword()) ::
               {:ok, %{url: String.t(), fields: map()}} | {:error, term()}
+
+  @doc """
+  What the store knows of an object without reading it: its size. `{:error, :not_found}` when
+  there is none. Used to complete a direct upload (`EmAttachments.Plug.Upload`).
+  """
+  @callback head(id :: String.t(), opts :: keyword()) ::
+              {:ok, %{size: non_neg_integer()}} | {:error, :not_found | term()}
+
+  @doc "Bytes `first..last` (inclusive) of an object, fewer when it is shorter."
+  @callback get_range(
+              id :: String.t(),
+              first :: non_neg_integer(),
+              last :: non_neg_integer(),
+              opts :: keyword()
+            ) ::
+              {:ok, binary()} | {:error, term()}
 
   @doc """
   Optional post-confirmation hook called by the Sweeper for each permanent row.

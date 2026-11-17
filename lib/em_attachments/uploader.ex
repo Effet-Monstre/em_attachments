@@ -82,9 +82,11 @@ defmodule EmAttachments.Uploader do
 
       defstruct [:id, :storage, :metadata, :uploader]
 
+      # A file in a form (`form[:avatar].value`, a hidden input) is its signed token, the only
+      # thing `cast_attachments/3` takes back from a client.
       defimpl String.Chars do
         def to_string(%{id: id} = file) when is_binary(id),
-          do: String.to_existing_atom(file.uploader).serialize(file)
+          do: String.to_existing_atom(file.uploader).sign(file)
 
         def to_string(_), do: ""
       end
@@ -167,8 +169,9 @@ defmodule EmAttachments.Uploader do
 
           def type, do: :map
 
-          def cast(json) when is_binary(json) do
-            case __MODULE__.deserialize(json) do
+          # Only a signed token (`sign/1`): a serialized file from a client is never trusted.
+          def cast(token) when is_binary(token) do
+            case __MODULE__.verify(token) do
               {:ok, file} -> {:ok, file}
               {:error, _} -> :error
             end
@@ -245,6 +248,19 @@ defmodule EmAttachments.Uploader do
       def presign_upload do
         EmAttachments.Uploader.Pipeline.presign_upload(__MODULE__)
       end
+
+      @doc "A signed token for a stored file, what a client sends back to attach it."
+      def sign(file), do: EmAttachments.Uploader.Pipeline.sign(__MODULE__, file)
+
+      @doc "The file of a token from `sign/1`, or `{:error, :invalid | :expired}`."
+      def verify(token), do: EmAttachments.Uploader.Pipeline.verify_file(__MODULE__, token)
+
+      @doc "A slot for a direct upload (`EmAttachments.Uploader.Pipeline.presign/2`)."
+      def presign(opts \\ []), do: EmAttachments.Uploader.Pipeline.presign(__MODULE__, opts)
+
+      @doc "A filled slot made a stored file (`EmAttachments.Uploader.Pipeline.complete/3`)."
+      def complete(token, opts \\ []),
+        do: EmAttachments.Uploader.Pipeline.complete(__MODULE__, token, opts)
 
       def serialize(file) do
         EmAttachments.Uploader.Pipeline.serialize(__MODULE__, file)

@@ -66,6 +66,57 @@ defmodule EmAttachments.Backends.S3 do
   end
 
   @impl true
+  def head(id, opts) do
+    url = object_url(id, opts)
+    headers = Signer.sign_request(:head, url, %{}, :unsigned, opts)
+
+    case Req.head(url, request_options(opts, headers: headers)) do
+      {:ok, %{status: 200} = response} ->
+        case Req.Response.get_header(response, "content-length") do
+          [length | _] -> {:ok, %{size: String.to_integer(length)}}
+          [] -> {:error, :no_content_length}
+        end
+
+      {:ok, %{status: 404}} ->
+        {:error, :not_found}
+
+      {:ok, %{status: s, body: b}} ->
+        {:error, {s, b}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def get_range(id, first, last, opts) do
+    url = object_url(id, opts)
+    range = %{"range" => "bytes=#{first}-#{last}"}
+    headers = Signer.sign_request(:get, url, range, :unsigned, opts)
+
+    case Req.get(url, request_options(opts, headers: headers, decode_body: false)) do
+      {:ok, %{status: 206, body: body}} ->
+        {:ok, body}
+
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, binary_part(body, 0, min(byte_size(body), last - first + 1))}
+
+      # An empty object has no byte to give.
+      {:ok, %{status: 416}} ->
+        {:ok, ""}
+
+      {:ok, %{status: 404}} ->
+        {:error, :not_found}
+
+      {:ok, %{status: s, body: b}} ->
+        {:error, {s, b}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
   def delete(id, opts) do
     url = object_url(id, opts)
     headers = Signer.sign_request(:delete, url, %{}, :unsigned, opts)
@@ -94,13 +145,20 @@ defmodule EmAttachments.Backends.S3 do
     end
   end
 
+  @doc """
+  A presigned POST writing exactly `<prefix>/<id>`, at most `:max_size` bytes when given,
+  valid `:url_expires_in` seconds (3600 by default).
+  """
   @impl true
   def presign_upload(id, opts) do
     bucket = Keyword.fetch!(opts, :bucket)
     prefix = opts[:prefix] || "uploads"
     expires_in = opts[:url_expires_in] || 3600
     bucket_url = build_bucket_url(bucket, opts)
-    {url, fields} = Signer.presign_post(bucket_url, bucket, "#{prefix}/#{id}", expires_in, opts)
+
+    {url, fields} =
+      Signer.presign_post(bucket_url, bucket, "#{prefix}/#{id}", expires_in, opts)
+
     {:ok, %{url: url, fields: fields}}
   end
 

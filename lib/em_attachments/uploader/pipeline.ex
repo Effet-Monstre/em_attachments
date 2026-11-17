@@ -1,7 +1,17 @@
 defmodule EmAttachments.Uploader.Pipeline do
   @moduledoc false
 
-  alias EmAttachments.{BackendFile, Config, MemoryFile, SourceFile, TempFile, Util}
+  alias EmAttachments.{
+    BackendFile,
+    Config,
+    MemoryFile,
+    Signer,
+    SourceFile,
+    TempFile,
+    Upload,
+    Util
+  }
+
   alias EmAttachments.Uploader.Topo
 
   # ---------------------------------------------------------------------------
@@ -19,6 +29,25 @@ defmodule EmAttachments.Uploader.Pipeline do
   end
 
   defp do_upload(uploader, source, call_opts) do
+    if too_large?(source, call_opts[:max_size]),
+      do: {:error, :too_large},
+      else: run_upload(uploader, source, call_opts)
+  end
+
+  defp too_large?(_source, nil), do: false
+
+  defp too_large?(source, max_size) do
+    size =
+      SourceFile.size(source) ||
+        case SourceFile.fetch_local_path(source) do
+          {:ok, path} -> File.stat!(path).size
+          {:error, _} -> 0
+        end
+
+    size > max_size
+  end
+
+  defp run_upload(uploader, source, call_opts) do
     ordered = Topo.resolve_order!(uploader.__uploader_plugins__())
     backend = Config.store(uploader.__uploader_opts__())
     results_key = {__MODULE__, make_ref()}
@@ -61,7 +90,7 @@ defmodule EmAttachments.Uploader.Pipeline do
       with :ok <-
              run_validations(
                source,
-               uploader.__validations__(),
+               validations(uploader, call_opts),
                ordered,
                plugin_results,
                call_opts
@@ -82,7 +111,7 @@ defmodule EmAttachments.Uploader.Pipeline do
             storage: :store,
             metadata: %{
               size: SourceFile.size(source),
-              filename: SourceFile.filename(source),
+              filename: Util.sanitize_filename(SourceFile.filename(source)),
               plugins: plugin_results
             },
             uploader: to_string(uploader)
@@ -261,6 +290,142 @@ defmodule EmAttachments.Uploader.Pipeline do
   def presign_upload(uploader) do
     {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
     store_mod.presign_upload(Util.uuid_v7(), store_opts)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Signed files and direct uploads
+  # ---------------------------------------------------------------------------
+
+  @file_salt "file"
+  @slot_salt "upload"
+
+  @doc "A token for a stored file, accepted by `cast_attachments/3` until the upload expires."
+  def sign(uploader, file) do
+    Signer.sign(@file_salt, %{"f" => serialize(uploader, file)}, Config.expiry_seconds())
+  end
+
+  @doc "The file of a token from `sign/2`, signed for this uploader."
+  def verify_file(uploader, token) do
+    name = to_string(uploader)
+
+    with {:ok, %{"f" => json}} when is_binary(json) <- Signer.verify(@file_salt, token),
+         {:ok, %{"uploader" => ^name}} <- Jason.decode(json) do
+      deserialize(uploader, json)
+    else
+      {:error, reason} when reason in [:invalid, :expired] -> {:error, reason}
+      _other -> {:error, :invalid}
+    end
+  end
+
+  @doc """
+  A slot for a direct upload: where to POST the file (`url`, `fields`) and the token that
+  completes it (`complete/3`). The slot is tracked as a pending asset, so the Sweeper removes
+  an upload never completed.
+
+  Options: `:max_size` (bytes), `:expires_in` (seconds, 3600), `:upload_url` (the Local
+  backend's target, given by `EmAttachments.Plug.Upload`).
+  """
+  def presign(uploader, opts \\ []) do
+    {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
+    id = Util.uuid_v7()
+    expires_in = opts[:expires_in] || 3600
+    max_size = opts[:max_size]
+
+    token =
+      Signer.sign(
+        @slot_salt,
+        %{"u" => to_string(uploader), "id" => id, "m" => max_size},
+        expires_in + 3600
+      )
+
+    presign_opts =
+      Keyword.merge(store_opts,
+        url_expires_in: expires_in,
+        max_size: max_size,
+        upload_url: opts[:upload_url],
+        slot_token: token
+      )
+
+    with {:ok, %{url: url, fields: fields}} <- store_mod.presign_upload(id, presign_opts) do
+      track_slot(uploader, id, expires_in)
+      {:ok, %{url: url, fields: fields, token: token}}
+    end
+  end
+
+  @doc "The slot of a token from `presign/2`: `%{id: id, max_size: max_size}`."
+  def verify_slot(uploader, token) do
+    name = to_string(uploader)
+
+    case Signer.verify(@slot_salt, token) do
+      {:ok, %{"u" => ^name, "id" => id} = data} when is_binary(id) ->
+        {:ok, %{id: id, max_size: data["m"]}}
+
+      {:ok, _other} ->
+        {:error, :invalid}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Writes a file into a slot from `presign/2` through the application (the Local backend's
+  target, `EmAttachments.Plug.Upload`).
+  """
+  def fill_slot(uploader, token, source) do
+    {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
+
+    with {:ok, %{id: id, max_size: max_size}} <- verify_slot(uploader, token) do
+      if too_large?(source, max_size),
+        do: {:error, :too_large},
+        else: store_mod.put(id, source, store_opts)
+    end
+  end
+
+  @doc """
+  Turns a filled slot into a stored file: the object is checked (size, and the uploader's
+  validations from its first bytes), copied to its asset id, and the slot removed, accepted or
+  not. Options: `:filename` (the client's, sanitized), `:validates`, plugin options.
+  """
+  def complete(uploader, token, opts \\ []) do
+    {store_mod, store_opts} = Config.store(uploader.__uploader_opts__())
+
+    with {:ok, %{id: slot_id, max_size: max_size}} <- verify_slot(uploader, token),
+         true <- function_exported?(store_mod, :head, 2) || {:error, :not_supported},
+         {:ok, %{size: size}} <- store_mod.head(slot_id, store_opts) do
+      result =
+        if is_integer(max_size) and size > max_size do
+          {:error, :too_large}
+        else
+          filename = Util.sanitize_filename(opts[:filename])
+          source = BackendFile.new(store_mod, store_opts, slot_id, filename, size)
+          upload(uploader, source, Keyword.drop(opts, [:filename]))
+        end
+
+      safe_delete(store_mod, slot_id, store_opts)
+      Upload.delete_asset(tracking_repo(), slot_id)
+      result
+    end
+  end
+
+  defp track_slot(uploader, id, expires_in) do
+    if repo = tracking_repo() do
+      Upload.insert_pending(repo, %{
+        asset_id: id,
+        uploader: to_string(uploader),
+        serialized: Jason.encode!(%{id: id, storage: "store", uploader: to_string(uploader)}),
+        status: "pending",
+        expires_at: DateTime.add(DateTime.utc_now(), expires_in + 2 * 3600, :second)
+      })
+    end
+  end
+
+  defp tracking_repo do
+    if Code.ensure_loaded?(Upload), do: Config.repo()
+  end
+
+  defp validations(uploader, call_opts) do
+    Keyword.merge(uploader.__validations__(), call_opts[:validates] || [])
   end
 
   def serialize(_uploader, file) do

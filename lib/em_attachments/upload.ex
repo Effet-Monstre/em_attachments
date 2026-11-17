@@ -13,11 +13,11 @@ if Code.ensure_loaded?(Ecto.Schema) do
     # so this value is only used if someone inspects the struct metadata directly.
     @em_config Application.compile_env(:em_attachments, :config, [])
     schema Keyword.get(@em_config, :table_name, "em_attachments_uploads") do
-      field :asset_id, :string
-      field :uploader, :string
-      field :serialized, :string
-      field :status, :string, default: "pending"
-      field :expires_at, :utc_datetime_usec
+      field(:asset_id, :string)
+      field(:uploader, :string)
+      field(:serialized, :string)
+      field(:status, :string, default: "pending")
+      field(:expires_at, :utc_datetime_usec)
       timestamps(updated_at: false)
     end
 
@@ -50,6 +50,40 @@ if Code.ensure_loaded?(Ecto.Schema) do
       repo.update_all(
         from(u in {em_source(), __MODULE__}, where: u.asset_id == ^asset_id),
         [set: [status: "permanent"]],
+        prefix: em_prefix()
+      )
+
+      :ok
+    end
+
+    @doc """
+    Claims a pending file for the record about to hold it: `pending` and not yet expired
+    becomes `permanent`. `:error` when no such row: already claimed, released, or expired, so
+    one upload is held by one record. Without a repo there is nothing to claim.
+    """
+    def claim(nil, _asset_id), do: :ok
+
+    def claim(repo, asset_id) do
+      now = DateTime.utc_now()
+
+      {count, _} =
+        repo.update_all(
+          from(u in {em_source(), __MODULE__},
+            where: u.asset_id == ^asset_id and u.status == "pending" and u.expires_at > ^now
+          ),
+          [set: [status: "permanent"]],
+          prefix: em_prefix()
+        )
+
+      if count == 1, do: :ok, else: :error
+    end
+
+    @doc "Forgets an asset's tracking row (an upload slot completed into another asset)."
+    def delete_asset(nil, _asset_id), do: :ok
+
+    def delete_asset(repo, asset_id) do
+      repo.delete_all(
+        from(u in {em_source(), __MODULE__}, where: u.asset_id == ^asset_id),
         prefix: em_prefix()
       )
 

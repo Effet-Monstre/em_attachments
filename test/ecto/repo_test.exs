@@ -46,7 +46,7 @@ defmodule EmAttachments.EctoRepoTest do
 
   # ── Validation error → serialize → resubmit via JSON → store ──────────────
 
-  test "invalid file produces error changeset; valid file stored and resubmitted via JSON" do
+  test "invalid file produces error changeset; valid file stored and resubmitted via its token" do
     # Step 1: bad upload fails MIME validation
     bad = %Plug.Upload{
       path: Fixtures.txt_path(),
@@ -62,13 +62,13 @@ defmodule EmAttachments.EctoRepoTest do
     assert bad_cs.errors[:avatar] != nil
     assert {:error, _} = Repo.insert(bad_cs)
 
-    # Step 2: valid file is uploaded and serialized for the hidden form field
+    # Step 2: valid file is uploaded and signed for the hidden form field
     {:ok, file} = BasicUploader.upload(%{path: Fixtures.png_path(), filename: "photo.png"})
-    json = BasicUploader.serialize(file)
+    token = to_string(file)
 
-    # Step 3: form resubmitted with corrected data + the pending JSON
+    # Step 3: form resubmitted with corrected data + the pending file's token
     good_cs =
-      DbUser.changeset(%{"name" => "Bob", "avatar" => json})
+      DbUser.changeset(%{"name" => "Bob", "avatar" => token})
       |> cast_attachments([:avatar])
 
     assert good_cs.valid?
@@ -101,7 +101,12 @@ defmodule EmAttachments.EctoRepoTest do
     import Ecto.Query
     table = EmAttachments.Config.table_name()
     prefix = EmAttachments.Config.schema_name()
-    rows = Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^original_id), prefix: prefix)
+
+    rows =
+      Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^original_id),
+        prefix: prefix
+      )
+
     assert [%{status: "pending"}] = rows
   end
 
@@ -149,7 +154,12 @@ defmodule EmAttachments.EctoRepoTest do
     import Ecto.Query
     table = EmAttachments.Config.table_name()
     prefix = EmAttachments.Config.schema_name()
-    rows = Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^original_id), prefix: prefix)
+
+    rows =
+      Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^original_id),
+        prefix: prefix
+      )
+
     assert [%{status: "pending"}] = rows
   end
 
@@ -260,7 +270,10 @@ defmodule EmAttachments.EctoRepoTest do
     png_data = Fixtures.proper_png()
 
     cs =
-      CmdStdoutDbUser.changeset(%{"name" => "Thumb User", "avatar" => {:binary, png_data, "photo.png"}})
+      CmdStdoutDbUser.changeset(%{
+        "name" => "Thumb User",
+        "avatar" => {:binary, png_data, "photo.png"}
+      })
       |> cast_attachments([:avatar])
 
     assert cs.valid?
@@ -323,7 +336,12 @@ defmodule EmAttachments.EctoRepoTest do
     table = EmAttachments.Config.table_name()
     prefix = EmAttachments.Config.schema_name()
     import Ecto.Query
-    [row] = Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^asset_id), prefix: prefix)
+
+    [row] =
+      Repo.all(from(u in {table, EmAttachments.Upload}, where: u.asset_id == ^asset_id),
+        prefix: prefix
+      )
+
     assert row.status == "pending"
   end
 

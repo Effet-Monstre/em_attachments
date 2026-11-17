@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.4.0
+
+Signed uploads are back, as the library's own: nothing a client sends is trusted unless the
+library signed it, and a file reaches one record.
+
+### Breaking
+
+- **`cast_attachments/3` refuses unsigned files.** A serialized file (JSON string or map)
+  from params is now an `"is invalid"` error unless it only names the current file again.
+  Hand clients `MyUploader.sign(file)`; `to_string(file)` (what `form[:field].value`
+  renders) now returns it, so hidden-input resubmission keeps working unchanged. Server code
+  attaching a file it stored itself passes the uploader's struct. No atom is created from
+  client input any more (`String.to_atom` on decoded keys, `to_existing_atom` on the
+  `uploader` field).
+- **`config :em_attachments, :config, secret_key:` is required** (32 bytes at least) to sign.
+- **A file is claimed once.** Saving a record with a token turns its tracking row from
+  `pending` to `permanent`; a second record, an expired upload or a released file is refused
+  (`"has already been used or has expired"`). Applications that attached one upload to
+  several records must upload (or copy) once per record.
+- **`EmAttachments.Plug.Upload` answers `{token, id, filename, size, content_type}`**
+  instead of the serialized file, and its errors are `{error, message}` with a code.
+- **`Mime` reads the `ftyp` brand.** Only playable brands are `video/mp4`; QuickTime is
+  `video/quicktime` (`.mov`), HEIF `image/heic`, AVIF `image/avif`, 3GPP `video/3gpp`, M4A
+  `audio/mp4`, an unknown brand no type. Uploaders accepting `video/mp4` for iPhone videos
+  should add `video/quicktime`.
+- **Stored filenames are sanitized** (`metadata.filename`): last path segment, no control
+  characters or quotes, 120 characters at most with the extension kept, `nil` when empty.
+- **The S3 presigned POST writes exactly its key** (it allowed any key starting with it) and
+  takes `:max_size` as a `content-length-range`.
+- `cast/1` of an uploader's Ecto type takes a signed token only.
+
+### Added
+
+- `EmAttachments.Signer` and `MyUploader.sign/1`, `verify/1`.
+- Direct uploads: `MyUploader.presign/1` (a slot, tracked so the Sweeper removes it if never
+  completed) and `complete/2` (size and first bytes checked, object copied to its asset id,
+  slot removed). `EmAttachments.Plug.Upload` mounts them: `POST /presign`, `POST /local`
+  (the Local backend's slot), `POST /complete`, and `POST /` as before, with `:validates`,
+  `:max_size` and `:on_storage_error` options; or route by route (`:action`, `:local_url`).
+- Backend callbacks `head/2` and `get_range/4` (Local and S3); `BackendFile.read_head/2` and
+  `Mime.detect_source/1` sniff a stored file from 16 bytes instead of downloading it.
+- Call-time validations and size limit: `MyUploader.upload(input, validates: [...],
+  max_size: n)`.
+- `EmAttachments.Ecto.release/2` for records deleted without a changeset.
+- `EmAttachments.download_name/2`, `EmAttachments.Error.message/1`.
+
 ## 0.3.3
 
 Dependency maintenance. No requirement in `mix.exs` changed: every lower bound stays where

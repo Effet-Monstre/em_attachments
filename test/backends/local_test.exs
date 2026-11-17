@@ -36,8 +36,33 @@ defmodule EmAttachments.Backends.LocalTest do
     assert {:ok, "/files/some-id"} = Local.url("some-id", opts)
   end
 
-  test "presign_upload returns not_supported", %{opts: opts} do
+  test "presign_upload returns not_supported without the plug's upload_url", %{opts: opts} do
     assert {:error, :not_supported} = Local.presign_upload("id", opts)
+  end
+
+  test "presign_upload points to the plug's upload_url", %{opts: opts} do
+    assert {:ok, %{url: "/up/local", fields: %{"token" => "slot"}}} =
+             Local.presign_upload("id", [upload_url: "/up/local", slot_token: "slot"] ++ opts)
+  end
+
+  test "head gives the size, get_range the bytes asked", %{opts: opts} do
+    Local.put("ranged", write_tmp("0123456789"), opts)
+
+    assert {:ok, %{size: 10}} = Local.head("ranged", opts)
+    assert {:ok, "0123"} = Local.get_range("ranged", 0, 3, opts)
+    assert {:ok, "89"} = Local.get_range("ranged", 8, 15, opts)
+    assert {:ok, ""} = Local.get_range("ranged", 20, 25, opts)
+    assert {:error, :not_found} = Local.head("missing", opts)
+    assert {:error, :not_found} = Local.get_range("missing", 0, 3, opts)
+  end
+
+  test "a BackendFile reads its head without downloading the file", %{opts: opts} do
+    Local.put("head", write_tmp("%PDF-1.7 and the rest"), opts)
+    bf = EmAttachments.BackendFile.new(Local, opts, "head", "doc.pdf", 21)
+
+    assert {:ok, {"application/pdf", "pdf"}} = EmAttachments.Mime.detect_source(bf)
+    assert EmAttachments.BackendFile.state(bf).local_path == nil
+    EmAttachments.BackendFile.cleanup(bf)
   end
 
   defp write_tmp(content) do

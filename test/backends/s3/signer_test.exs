@@ -60,6 +60,23 @@ defmodule EmAttachments.Backends.S3.SignerTest do
     assert Map.has_key?(fields, "x-amz-credential")
   end
 
+  test "presign_post writes exactly its key, capped by max_size" do
+    {_url, fields} =
+      Signer.presign_post(
+        "https://mybucket.s3.amazonaws.com",
+        "mybucket",
+        "uploads/0190-abc",
+        3600,
+        Keyword.put(@opts, :max_size, 1000)
+      )
+
+    assert fields["key"] == "uploads/0190-abc"
+    %{"conditions" => conditions} = fields["policy"] |> Base.decode64!() |> Jason.decode!()
+    assert %{"key" => "uploads/0190-abc"} in conditions
+    assert ["content-length-range", 0, 1000] in conditions
+    refute Enum.any?(conditions, &match?(["starts-with" | _], &1))
+  end
+
   test "presign_url produces different signatures for different expiry" do
     url1 = Signer.presign_url("https://mybucket.s3.amazonaws.com/file", 3600, @opts)
     url2 = Signer.presign_url("https://mybucket.s3.amazonaws.com/file", 7200, @opts)
