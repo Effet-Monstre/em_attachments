@@ -52,7 +52,8 @@ defmodule EmAttachments.Backends.S3.CachePolicyTest do
     assert :ok = S3.finalize(id, public_opts)
 
     # Object should now be publicly accessible without signing
-    public_url = "https://#{opts[:bucket]}.s3.#{opts[:region] || "us-east-1"}.amazonaws.com/em_test_acl/#{id}"
+    public_url =
+      "https://#{opts[:bucket]}.s3.#{opts[:region] || "us-east-1"}.amazonaws.com/em_test_acl/#{id}"
 
     case Req.get(public_url) do
       {:ok, %{status: 200, body: body}} ->

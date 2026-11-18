@@ -45,9 +45,12 @@ defmodule EmAttachments.ConfigTest do
     end
 
     test "returns the configured repo" do
-      with_config([store: {Local, fs_path: "/s", render_path: "/s"}, repo: SomeRepo, secret_key: "k"], fn ->
-        assert Config.repo() == SomeRepo
-      end)
+      with_config(
+        [store: {Local, fs_path: "/s", render_path: "/s"}, repo: SomeRepo, secret_key: "k"],
+        fn ->
+          assert Config.repo() == SomeRepo
+        end
+      )
     end
   end
 
@@ -59,9 +62,12 @@ defmodule EmAttachments.ConfigTest do
     end
 
     test "returns the configured repo" do
-      with_config([store: {Local, fs_path: "/s", render_path: "/s"}, repo: SomeRepo, secret_key: "k"], fn ->
-        assert Config.repo!() == SomeRepo
-      end)
+      with_config(
+        [store: {Local, fs_path: "/s", render_path: "/s"}, repo: SomeRepo, secret_key: "k"],
+        fn ->
+          assert Config.repo!() == SomeRepo
+        end
+      )
     end
   end
 
@@ -77,9 +83,12 @@ defmodule EmAttachments.ConfigTest do
     end
 
     test "returns configured value" do
-      with_config([store: {Local, fs_path: "/s", render_path: "/s"}, expiry: 5000, secret_key: "k"], fn ->
-        assert Config.expiry() == 5000
-      end)
+      with_config(
+        [store: {Local, fs_path: "/s", render_path: "/s"}, expiry: 5000, secret_key: "k"],
+        fn ->
+          assert Config.expiry() == 5000
+        end
+      )
     end
   end
 
@@ -92,7 +101,11 @@ defmodule EmAttachments.ConfigTest do
 
     test "returns configured opts" do
       with_config(
-        [store: {Local, fs_path: "/s", render_path: "/s"}, finalize_opts: [acl: "public-read"], secret_key: "k"],
+        [
+          store: {Local, fs_path: "/s", render_path: "/s"},
+          finalize_opts: [acl: "public-read"],
+          secret_key: "k"
+        ],
         fn -> assert Config.finalize_opts() == [acl: "public-read"] end
       )
     end
@@ -107,7 +120,11 @@ defmodule EmAttachments.ConfigTest do
 
     test "returns configured value" do
       with_config(
-        [store: {Local, fs_path: "/s", render_path: "/s"}, sweeper_interval: 60_000, secret_key: "k"],
+        [
+          store: {Local, fs_path: "/s", render_path: "/s"},
+          sweeper_interval: 60_000,
+          secret_key: "k"
+        ],
         fn -> assert Config.sweeper_interval() == 60_000 end
       )
     end
@@ -120,19 +137,29 @@ defmodule EmAttachments.ConfigTest do
   describe "resolve_value/1" do
     test "resolves {:env, var} from system env" do
       System.put_env("EM_TEST_VAR", "resolved")
-      with_config([store: {Local, fs_path: {:env, "EM_TEST_VAR"}, render_path: "/s"}, secret_key: "k"], fn ->
-        {Local, opts} = Config.store()
-        assert opts[:fs_path] == "resolved"
-      end)
+
+      with_config(
+        [store: {Local, fs_path: {:env, "EM_TEST_VAR"}, render_path: "/s"}, secret_key: "k"],
+        fn ->
+          {Local, opts} = Config.store()
+          assert opts[:fs_path] == "resolved"
+        end
+      )
     after
       System.delete_env("EM_TEST_VAR")
     end
 
     test "resolves {:env, var, default} with fallback" do
-      with_config([store: {Local, fs_path: {:env, "EM_MISSING_VAR", "/default"}, render_path: "/s"}, secret_key: "k"], fn ->
-        {Local, opts} = Config.store()
-        assert opts[:fs_path] == "/default"
-      end)
+      with_config(
+        [
+          store: {Local, fs_path: {:env, "EM_MISSING_VAR", "/default"}, render_path: "/s"},
+          secret_key: "k"
+        ],
+        fn ->
+          {Local, opts} = Config.store()
+          assert opts[:fs_path] == "/default"
+        end
+      )
     end
   end
 end

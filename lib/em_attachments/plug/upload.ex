@@ -12,17 +12,13 @@ if Code.ensure_loaded?(Plug.Conn) do
           max_size: 100_000_000,
           validates: [mime: [type: ~w(image/png image/jpeg application/pdf)]]
 
-    Or route by route, when the application declares each path with its verb (`:action`, and
-    `:local_url` for the Local backend's slot):
-
-        post "/api/uploads/presign", EmAttachments.Plug.Upload, [action: :presign] ++ opts
-        post "/api/uploads/local", EmAttachments.Plug.Upload, [action: :local] ++ opts
-        post "/api/uploads/complete", EmAttachments.Plug.Upload, [action: :complete] ++ opts
+    In a Phoenix router, `EmAttachments.Router.attachments/2` mounts it with the file route
+    (`EmAttachments.Plug.File`) under one path.
 
     Two ways in, the same answer:
 
       - **Direct** (the bytes never pass through the application on S3):
-        1. `POST /presign` (optional `size`): `{url, fields, token}`;
+        1. `POST /presign` (optional `size`): `{url, fields, token, complete_url}`;
         2. a `multipart/form-data` POST to `url` with every `fields` entry as given, then
            `file` last (S3's presigned POST, or `POST /local` on the Local backend, whose
            fields carry the slot's `token`);
@@ -43,7 +39,8 @@ if Code.ensure_loaded?(Plug.Conn) do
       - `:on_storage_error` `{module, function}` called with the reason of a storage failure
         (to report it), before the `502`
       - `:action` (`:upload`, `:presign`, `:local`, `:complete`) instead of routing by path
-      - `:local_url` where the Local backend's slot is posted (this plug's `/local` by default)
+      - `:base` the path its other routes are under (`EmAttachments.Router` sets it)
+      - `:local_url` where the Local backend's slot is posted (`<base>/local` by default)
     """
 
     @behaviour Plug
@@ -105,12 +102,15 @@ if Code.ensure_loaded?(Plug.Conn) do
           slot_opts = [
             max_size: max_size,
             expires_in: opts[:expires_in] || 3600,
-            upload_url: opts[:local_url] || local_url(conn)
+            upload_url: opts[:local_url] || sibling(conn, opts, "local")
           ]
 
           case opts[:uploader].presign(slot_opts) do
-            {:ok, slot} -> json(conn, 200, slot)
-            {:error, reason} -> storage_error(conn, reason, opts)
+            {:ok, slot} ->
+              json(conn, 200, Map.put(slot, :complete_url, sibling(conn, opts, "complete")))
+
+            {:error, reason} ->
+              storage_error(conn, reason, opts)
           end
       end
     end
@@ -192,10 +192,10 @@ if Code.ensure_loaded?(Plug.Conn) do
       json(conn, 502, %{error: :storage, message: EmAttachments.Error.message(reason)})
     end
 
-    # Where the Local backend's form goes: this plug's own `/local`.
-    defp local_url(conn) do
-      "/" <> Enum.join(conn.script_name ++ ["local"], "/")
-    end
+    # This plug's other routes: under `:base` (`EmAttachments.Router`), else its mount.
+    defp sibling(_conn, %{base: base}, name), do: base <> "/" <> name
+    defp sibling(conn, opts, name) when is_list(opts), do: sibling(conn, Map.new(opts), name)
+    defp sibling(conn, _opts, name), do: "/" <> Enum.join(conn.script_name ++ [name], "/")
 
     defp parse(conn, length) do
       Plug.Parsers.call(

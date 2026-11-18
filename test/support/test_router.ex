@@ -14,10 +14,8 @@ if Code.ensure_loaded?(Phoenix.Router) do
       max_size: 10
     )
 
-    # Route by route, as an application declaring each path with its verb does.
-    @opts [uploader: EmAttachments.Test.BasicUploader, local_url: "/files/local"]
-    post("/files/presign", EmAttachments.Plug.Upload, [action: :presign] ++ @opts)
-    post("/files/local", EmAttachments.Plug.Upload, [action: :local] ++ @opts)
-    post("/files/complete", EmAttachments.Plug.Upload, [action: :complete] ++ @opts)
+    # Uploads and files under one path, as an application mounts them.
+    import EmAttachments.Router
+    attachments("/files", uploader: EmAttachments.Test.BasicUploader)
   end
 end

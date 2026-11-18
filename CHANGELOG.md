@@ -33,6 +33,14 @@ library signed it, and a file reaches one record.
 
 ### Added
 
+- **`EmAttachments.Router.attachments/2`** mounts an uploader's routes in a Phoenix router
+  under one path: the upload slot (`POST <path>`, answering its `complete_url` too), the Local
+  slot and its completion, and `GET <path>/:token`.
+- **Files' URLs** (`EmAttachments.Plug.File`, `url_token/2`, `verify_url_token/1`): a signed
+  token names a file and its download name; the plug redirects to the store's short-lived
+  URL, a `404` once no record holds the file. Stable for a period, so browsers keep files.
+- `EmAttachments.Signer.sign_until/3`: a token with a fixed expiry.
+
 - `EmAttachments.Signer` and `MyUploader.sign/1`, `verify/1`.
 - Direct uploads: `MyUploader.presign/1` (a slot, tracked so the Sweeper removes it if never
   completed) and `complete/2` (size and first bytes checked, object copied to its asset id,

@@ -4,7 +4,8 @@ defmodule EmAttachments.Plugins.MimeTest do
   alias EmAttachments.{Plugins.Mime, TempFile}
   alias EmAttachments.Test.Fixtures
 
-  defp cache_upload(tf), do: Mime.init(tf, %{plugin_key: :mime, uploader: nil, deps: %{}, plugin_opts: []})
+  defp cache_upload(tf),
+    do: Mime.init(tf, %{plugin_key: :mime, uploader: nil, deps: %{}, plugin_opts: []})
 
   defp tmp_file(content, name) do
     path =
@@ -90,7 +91,12 @@ defmodule EmAttachments.Plugins.MimeTest do
   end
 
   defp validate(validation_opts, own_result),
-    do: Mime.validate(nil, own_result, %{plugin_key: :mime, plugin_opts: [], validation_opts: validation_opts})
+    do:
+      Mime.validate(nil, own_result, %{
+        plugin_key: :mime,
+        plugin_opts: [],
+        validation_opts: validation_opts
+      })
 
   describe "validate/3" do
     test "passes when type is in allowed list" do
@@ -98,7 +104,9 @@ defmodule EmAttachments.Plugins.MimeTest do
     end
 
     test "fails when type is not in allowed list" do
-      assert {:error, msg} = validate([type: ~w(image/png)], %{type: "image/jpeg", extension: "jpg"})
+      assert {:error, msg} =
+               validate([type: ~w(image/png)], %{type: "image/jpeg", extension: "jpg"})
+
       assert msg =~ "image/jpeg"
     end
 
@@ -107,12 +115,16 @@ defmodule EmAttachments.Plugins.MimeTest do
     end
 
     test "fails when extension is not in allowed list" do
-      assert {:error, msg} = validate([extension: ~w(png)], %{type: "image/jpeg", extension: "jpg"})
+      assert {:error, msg} =
+               validate([extension: ~w(png)], %{type: "image/jpeg", extension: "jpg"})
+
       assert msg =~ "jpg"
     end
 
     test "accumulates multiple errors" do
-      result = validate([type: ~w(image/png), extension: ~w(png)], %{type: "image/gif", extension: "gif"})
+      result =
+        validate([type: ~w(image/png), extension: ~w(png)], %{type: "image/gif", extension: "gif"})
+
       assert {:error, errors} = result
       assert is_list(errors)
       assert length(errors) == 2

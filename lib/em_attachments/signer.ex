@@ -4,7 +4,8 @@ defmodule EmAttachments.Signer do
   point a record at a file it did not upload:
 
     - a stored file to attach (`c:sign/1` on an uploader, read by `cast_attachments/3`);
-    - an upload slot to fill and complete (`EmAttachments.Plug.Upload`).
+    - an upload slot to fill and complete (`EmAttachments.Plug.Upload`);
+    - a stored file's URL (`c:url_token/2` on an uploader, served by `EmAttachments.Plug.File`).
 
   A token is a JSON payload and its HMAC-SHA256, both base64url, joined by a dot. It carries
   its expiry and the purpose it was signed for (`salt`): a token signed for one purpose is
@@ -18,8 +19,15 @@ defmodule EmAttachments.Signer do
 
   @doc "Signs `data` (JSON-encodable) for `salt`, valid `max_age` seconds."
   @spec sign(salt(), term(), pos_integer()) :: String.t()
-  def sign(salt, data, max_age) when is_binary(salt) and is_integer(max_age) do
-    expires = System.system_time(:second) + max_age
+  def sign(salt, data, max_age) when is_binary(salt) and is_integer(max_age),
+    do: sign_until(salt, data, System.system_time(:second) + max_age)
+
+  @doc """
+  Signs `data` for `salt`, valid until `expires` (Unix seconds): the same data and expiry give
+  the same token.
+  """
+  @spec sign_until(salt(), term(), integer()) :: String.t()
+  def sign_until(salt, data, expires) when is_binary(salt) and is_integer(expires) do
     payload = Jason.encode!(%{"d" => data, "e" => expires}) |> Base.url_encode64(padding: false)
     payload <> "." <> mac(salt, payload)
   end

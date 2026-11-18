@@ -5,7 +5,8 @@ defmodule EmAttachments.Plugins.DimensionsTest do
   alias EmAttachments.Test.Fixtures
 
   defp cache_upload(tf, opts),
-    do: Dimensions.init(tf, %{plugin_key: :dimensions, uploader: nil, deps: %{}, plugin_opts: opts})
+    do:
+      Dimensions.init(tf, %{plugin_key: :dimensions, uploader: nil, deps: %{}, plugin_opts: opts})
 
   describe "init/2 (cache phase)" do
     test "calls function adapter and returns dimensions" do
@@ -34,7 +35,12 @@ defmodule EmAttachments.Plugins.DimensionsTest do
   end
 
   defp validate(validation_opts, own_result),
-    do: Dimensions.validate(nil, own_result, %{plugin_key: :dimensions, plugin_opts: [], validation_opts: validation_opts})
+    do:
+      Dimensions.validate(nil, own_result, %{
+        plugin_key: :dimensions,
+        plugin_opts: [],
+        validation_opts: validation_opts
+      })
 
   describe "validate/3" do
     test "passes when no validation opts are set" do
@@ -76,7 +82,9 @@ defmodule EmAttachments.Plugins.DimensionsTest do
     end
 
     test "accumulates multiple errors" do
-      assert {:error, errors} = validate([max_width: 100, max_height: 100], %{width: 200, height: 200})
+      assert {:error, errors} =
+               validate([max_width: 100, max_height: 100], %{width: 200, height: 200})
+
       assert is_list(errors)
       assert length(errors) == 2
     end

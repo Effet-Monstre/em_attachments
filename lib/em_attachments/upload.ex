@@ -56,6 +56,17 @@ if Code.ensure_loaded?(Ecto.Schema) do
       :ok
     end
 
+    @doc "The serialized file of a permanent asset (held by a record), or nil."
+    def permanent(repo, asset_id, uploader) do
+      repo.one(
+        from(u in {em_source(), __MODULE__},
+          where: u.asset_id == ^asset_id and u.uploader == ^uploader and u.status == "permanent",
+          select: u.serialized
+        ),
+        prefix: em_prefix()
+      )
+    end
+
     @doc """
     Claims a pending file for the record about to hold it: `pending` and not yet expired
     becomes `permanent`. `:error` when no such row: already claimed, released, or expired, so

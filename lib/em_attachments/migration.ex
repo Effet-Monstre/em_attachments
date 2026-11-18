@@ -54,7 +54,13 @@ defmodule EmAttachments.Migration do
           end
 
         schema_str = if schema_name, do: to_string(schema_name), else: nil
-        table_atom = Keyword.get(unquote(opts), :table, if(schema_str, do: :uploads, else: :em_attachments_uploads))
+
+        table_atom =
+          Keyword.get(
+            unquote(opts),
+            :table,
+            if(schema_str, do: :uploads, else: :em_attachments_uploads)
+          )
 
         if schema_str do
           execute("CREATE SCHEMA IF NOT EXISTS \"#{schema_str}\"")

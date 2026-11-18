@@ -255,6 +255,14 @@ defmodule EmAttachments.Uploader do
       @doc "The file of a token from `sign/1`, or `{:error, :invalid | :expired}`."
       def verify(token), do: EmAttachments.Uploader.Pipeline.verify_file(__MODULE__, token)
 
+      @doc "A token for the file's URL (`EmAttachments.Uploader.Pipeline.url_token/3`)."
+      def url_token(file, opts \\ []),
+        do: EmAttachments.Uploader.Pipeline.url_token(__MODULE__, file, opts)
+
+      @doc "The file of a URL token (`EmAttachments.Uploader.Pipeline.verify_url_token/2`)."
+      def verify_url_token(token),
+        do: EmAttachments.Uploader.Pipeline.verify_url_token(__MODULE__, token)
+
       @doc "A slot for a direct upload (`EmAttachments.Uploader.Pipeline.presign/2`)."
       def presign(opts \\ []), do: EmAttachments.Uploader.Pipeline.presign(__MODULE__, opts)
 

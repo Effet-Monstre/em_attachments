@@ -32,7 +32,16 @@ defmodule EmAttachments.Plugin do
   `EmAttachments.plugin_data/2` helper: `EmAttachments.plugin_data(ctx, :mime)`.
   """
 
-  @optional_callbacks [cast: 2, init: 2, upload: 3, validate: 3, destroy: 2, url: 3, after_confirm: 2, asset_ids: 2]
+  @optional_callbacks [
+    cast: 2,
+    init: 2,
+    upload: 3,
+    validate: 3,
+    destroy: 2,
+    url: 3,
+    after_confirm: 2,
+    asset_ids: 2
+  ]
 
   @doc """
   Called by `cast_attachments` before the upload pipeline to convert a raw changeset

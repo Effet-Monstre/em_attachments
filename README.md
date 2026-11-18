@@ -393,9 +393,19 @@ forward "/api/uploads", EmAttachments.Plug.Upload,
   validates: [mime: [type: ~w(image/png image/jpeg)]] # over the uploader's own
 ```
 
-An application that declares each path with its verb mounts it route by route instead:
-`post "/api/uploads/presign", EmAttachments.Plug.Upload, [action: :presign] ++ opts` (and
-`:local`, `:complete`), with `local_url:` the path of its `:local` route.
+In a Phoenix router, `EmAttachments.Router.attachments/2` mounts uploads and the files'
+URLs (below) under one path, behind the scope's pipelines:
+
+```elixir
+import EmAttachments.Router
+
+scope "/" do
+  pipe_through [:api, :authenticated]
+  attachments "/api/files", uploader: MyApp.FileUploader, max_size: 10_000_000
+end
+# POST /api/files (a slot, with its `complete_url`), POST /api/files/local,
+# POST /api/files/complete, GET /api/files/:token
+```
 
 | Route | Body | Answer |
 |---|---|---|
@@ -421,6 +431,17 @@ await fetch(slot.url, { method: "POST", body: form })
 const { token } = await post("/api/uploads/complete", { token: slot.token, filename: file.name })
 // send `token` with the record
 ```
+
+## Files' URLs: `EmAttachments.Plug.File`
+
+A private store's files are reached through the application: `MyUploader.url_token(file,
+name: "Bail")` names a file (and the name it downloads as) in a signed token, and
+`GET <path>/:token` (`EmAttachments.Router.attachments/2`) redirects to the store's
+short-lived URL (`?download=1` to download it). The token is the authorization: hand it only
+to who may see the record holding the file, in the data you send them. With tracking, it
+reaches the file only while a record holds it (a released file is a `404`). It's valid one to
+two `:max_age` (7 days by default) and the same for a file, a name and a period, so a page
+reloaded gets the same URL and the browser keeps the file.
 
 ## Per-call backend overrides
 

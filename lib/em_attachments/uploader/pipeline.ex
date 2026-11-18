@@ -298,6 +298,8 @@ defmodule EmAttachments.Uploader.Pipeline do
 
   @file_salt "file"
   @slot_salt "upload"
+  @url_salt "url"
+  @url_period 7 * 24 * 3600
 
   @doc "A token for a stored file, accepted by `cast_attachments/3` until the upload expires."
   def sign(uploader, file) do
@@ -314,6 +316,49 @@ defmodule EmAttachments.Uploader.Pipeline do
     else
       {:error, reason} when reason in [:invalid, :expired] -> {:error, reason}
       _other -> {:error, :invalid}
+    end
+  end
+
+  @doc """
+  A token naming a stored file in a URL (`EmAttachments.Plug.File`): its asset id and the name
+  it downloads as (`:name`). Whoever holds it reaches the file while it's held by a record
+  (tracked: `permanent`), so the application hands it only to who may see that record.
+
+  It's valid for one to two `:max_age` (seconds, 7 days by default), and the same for a file,
+  name and period: a page reloaded gets the same URL, which the browser keeps.
+  """
+  def url_token(uploader, file, opts \\ []) do
+    period = opts[:max_age] || @url_period
+    expires = (div(System.system_time(:second), period) + 2) * period
+    data = %{"i" => file.id, "n" => opts[:name]}
+
+    data =
+      if Config.repo(), do: data, else: Map.put(data, "f", serialize(uploader, file))
+
+    Signer.sign_until(@url_salt, data, expires)
+  end
+
+  @doc """
+  The file a URL token names, and its name: `{:ok, file, name}`, or `{:error, :invalid |
+  :expired | :not_found}` (a file released, by its record deleted or its file replaced).
+  """
+  def verify_url_token(uploader, token) do
+    with {:ok, %{"i" => id} = data} when is_binary(id) <- Signer.verify(@url_salt, token),
+         {:ok, file} <- url_file(uploader, id, data) do
+      {:ok, file, data["n"]}
+    else
+      {:ok, _data} -> {:error, :invalid}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp url_file(uploader, _id, %{"f" => json}) when is_binary(json),
+    do: deserialize(uploader, json)
+
+  defp url_file(uploader, id, _data) do
+    case Upload.permanent(Config.repo!(), id, to_string(uploader)) do
+      nil -> {:error, :not_found}
+      json -> deserialize(uploader, json)
     end
   end
 

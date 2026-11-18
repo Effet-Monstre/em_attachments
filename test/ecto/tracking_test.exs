@@ -31,8 +31,8 @@ defmodule EmAttachments.TrackingTest do
     @primary_key {:id, :binary_id, autogenerate: true}
 
     schema "users" do
-      field :name, :string
-      field :avatar, EmAttachments.Test.DerivativeUploader
+      field(:name, :string)
+      field(:avatar, EmAttachments.Test.DerivativeUploader)
       timestamps(type: :utc_datetime_usec)
     end
 
@@ -86,6 +86,7 @@ defmodule EmAttachments.TrackingTest do
 
       assert parsed["id"] == deriv_id
       assert parsed["storage"] == "store"
+
       assert is_nil(parsed["metadata"]),
              "derivative row must not carry full file metadata"
     end

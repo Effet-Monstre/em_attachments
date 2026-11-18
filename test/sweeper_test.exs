@@ -112,7 +112,9 @@ defmodule EmAttachments.SweeperTest do
   # ---------------------------------------------------------------------------
 
   test "sweep/1 only removes expired pending files; permanent and non-expired pending files remain" do
-    {:ok, expired} = NoPluginUploader.upload(%{path: Fixtures.png_path(), filename: "expired.png"})
+    {:ok, expired} =
+      NoPluginUploader.upload(%{path: Fixtures.png_path(), filename: "expired.png"})
+
     {:ok, fresh} = NoPluginUploader.upload(%{path: Fixtures.png_path(), filename: "fresh.png"})
     {:ok, permanent} = NoPluginUploader.upload(%{path: Fixtures.png_path(), filename: "perm.png"})
 

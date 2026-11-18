@@ -148,8 +148,9 @@ if Code.ensure_loaded?(Phoenix.Router) do
       end
     end
 
-    test "route by route (`:action`, `:local_url`), the same flow" do
-      %{"url" => "/files/local", "fields" => fields} = body(post("/files/presign", %{}))
+    test "mounted by `EmAttachments.Router`: the slot says where to complete it" do
+      %{"url" => "/files/local", "fields" => fields, "complete_url" => "/files/complete"} =
+        body(post("/files", %{}))
 
       assert post("/files/local", Map.put(fields, "file", png())).status == 204
 
